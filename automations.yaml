@@ -1,0 +1,1061 @@
+- id: '1788649508126'
+  alias: Bosch Gefrierschrank - Leistungsüberwachung
+  description: 'Alarmiert, wenn der Gefrierschrank länger als 180 Minuten über 25
+    W oder länger als 180 Minuten unter 15 W liegt.
+
+    '
+  triggers:
+  - trigger: numeric_state
+    entity_id: sensor.nous2_bosch_gefrierschrank_energy_power
+    above: 25
+    for:
+      hours: 3
+    id: laeuft_zu_lange
+  - trigger: numeric_state
+    entity_id: sensor.nous2_bosch_gefrierschrank_energy_power
+    below: 15
+    for:
+      hours: 3
+    id: laeuft_nicht
+  conditions: []
+  actions:
+  - choose:
+    - conditions:
+      - condition: trigger
+        id: laeuft_zu_lange
+      sequence:
+      - action: telegram_bot.send_message
+        data:
+          message: Bosch Eisschrank läuft seit 180 Minuten dauerhaft mit mehr als
+            25 W! Bitte prüfen, ob die Tür richtig geschlossen ist!
+          chat_id:
+          - 173339841
+          - 770182243
+      - action: notify.pushover
+        data:
+          message: Bosch Eisschrank läuft seit 180 Minuten dauerhaft mit mehr als
+            25 W! Bitte prüfen, ob die Tür richtig geschlossen ist!
+          data:
+            sound: magic
+            priority: 1
+    - conditions:
+      - condition: trigger
+        id: laeuft_nicht
+      sequence:
+      - action: telegram_bot.send_message
+        data:
+          message: Bosch Eisschrank läuft seit 180 Minuten nicht! Stromversorgung
+            prüfen!
+          chat_id:
+          - 173339841
+          - 770182243
+      - action: notify.pushover
+        data:
+          message: Bosch Eisschrank läuft seit 180 Minuten nicht! Stromversorgung
+            prüfen!
+          data:
+            sound: magic
+            priority: 1
+  mode: single
+- id: '1788680540114'
+  alias: LG Eisschrank - Leistungsüberwachung
+  description: 'Alarmiert, wenn der LG Eisschrank länger als 180 Minuten über 25 W
+    oder länger als 180 Minuten unter 15 W liegt.
+
+    '
+  triggers:
+  - trigger: numeric_state
+    entity_id:
+    - sensor.nous_6_lg_kuhlschrank_energy_power
+    above: 25
+    for:
+      hours: 3
+    id: laeuft_zu_lange
+  - trigger: numeric_state
+    entity_id:
+    - sensor.nous_6_lg_kuhlschrank_energy_power
+    below: 15
+    for:
+      hours: 3
+    id: laeuft_nicht
+  conditions: []
+  actions:
+  - choose:
+    - conditions:
+      - condition: trigger
+        id: laeuft_zu_lange
+      sequence:
+      - action: telegram_bot.send_message
+        data:
+          message: LG Eisschrank läuft seit 180 Minuten dauerhaft mit mehr als 25
+            W! Bitte prüfen, ob die Tür richtig geschlossen ist!
+          chat_id:
+          - 173339841
+          - 770182243
+      - action: notify.pushover
+        data:
+          message: LG Eisschrank läuft seit 180 Minuten dauerhaft mit mehr als 25
+            W! Bitte prüfen, ob die Tür richtig geschlossen ist!
+          data:
+            sound: magic
+            priority: 1
+    - conditions:
+      - condition: trigger
+        id: laeuft_nicht
+      sequence:
+      - action: telegram_bot.send_message
+        data:
+          message: LG Eisschrank läuft seit 180 Minuten nicht! Stromversorgung prüfen!
+          chat_id:
+          - 173339841
+          - 770182243
+      - action: notify.pushover
+        data:
+          message: LG Eisschrank läuft seit 180 Minuten nicht! Stromversorgung prüfen!
+          data:
+            sound: magic
+            priority: 1
+  mode: single
+- id: '1788682241755'
+  alias: Garage Kühlschrank - Zeitsteuerung
+  description: 'Schaltet den Kühlschrank zwischen 09:00 und 20:00 Uhr ein. Außerhalb
+    dieses Zeitfensters wird er ausgeschaltet, sobald die Leistungsaufnahme höchstens
+    5 W beträgt. Ereignisgesteuert ohne 5-Minuten-Abfrage.
+
+    '
+  triggers:
+  - trigger: time
+    at: 09:00:00
+    id: einschalten
+  - trigger: time
+    at: '20:00:00'
+    id: zeit_ende
+  - trigger: numeric_state
+    entity_id: sensor.nous3_kuhlschrank_garage_energy_power
+    below: 5.01
+    id: leistung_niedrig
+  - trigger: homeassistant
+    event: start
+    id: ha_start
+  conditions: []
+  actions:
+  - choose:
+    - conditions:
+      - condition: trigger
+        id: einschalten
+      - condition: state
+        entity_id: switch.nous3_kuhlschrank_garage_nous3
+        state: 'off'
+      sequence:
+      - action: switch.turn_on
+        target:
+          entity_id: switch.nous3_kuhlschrank_garage_nous3
+      - action: telegram_bot.send_message
+        data:
+          chat_id:
+          - 173339841
+          message: Kühlschrank in der Garage wurde eingeschaltet!
+    - conditions:
+      - condition: trigger
+        id:
+        - zeit_ende
+        - leistung_niedrig
+      - condition: or
+        conditions:
+        - condition: time
+          after: '20:00:00'
+        - condition: time
+          before: 09:00:00
+      - condition: state
+        entity_id: switch.nous3_kuhlschrank_garage_nous3
+        state: 'on'
+      - condition: numeric_state
+        entity_id: sensor.nous3_kuhlschrank_garage_energy_power
+        below: 5.01
+      sequence:
+      - action: switch.turn_off
+        target:
+          entity_id: switch.nous3_kuhlschrank_garage_nous3
+      - action: telegram_bot.send_message
+        data:
+          chat_id:
+          - 173339841
+          message: Kühlschrank in der Garage wurde ausgeschaltet!
+    - conditions:
+      - condition: trigger
+        id: ha_start
+      sequence:
+      - choose:
+        - conditions:
+          - condition: time
+            after: 09:00:00
+            before: '20:00:00'
+          - condition: state
+            entity_id: switch.nous3_kuhlschrank_garage_nous3
+            state: 'off'
+          sequence:
+          - action: switch.turn_on
+            target:
+              entity_id: switch.nous3_kuhlschrank_garage_nous3
+          - action: telegram_bot.send_message
+            data:
+              chat_id:
+              - 173339841
+              message: Kühlschrank in der Garage wurde eingeschaltet!
+        - conditions:
+          - condition: or
+            conditions:
+            - condition: time
+              after: '20:00:00'
+            - condition: time
+              before: 09:00:00
+          - condition: state
+            entity_id: switch.nous3_kuhlschrank_garage_nous3
+            state: 'on'
+          - condition: numeric_state
+            entity_id: sensor.nous3_kuhlschrank_garage_energy_power
+            below: 5.01
+          sequence:
+          - action: switch.turn_off
+            target:
+              entity_id: switch.nous3_kuhlschrank_garage_nous3
+          - action: telegram_bot.send_message
+            data:
+              chat_id:
+              - 173339841
+              message: Kühlschrank in der Garage wurde ausgeschaltet!
+  mode: single
+- id: '1788719588508'
+  alias: Dachboden Entfeuchter nach Feuchte Temperatur Zeit
+  description: 'Steuert den Luftentfeuchter auf dem Dachboden abhängig von Luftfeuchtigkeit,
+    Außentemperatur und Uhrzeit. Ereignisgesteuert ohne minütliche Abfrage.
+
+    '
+  triggers:
+  - trigger: numeric_state
+    entity_id: sensor.thermodachboden_humidity
+    above: 68
+    id: feuchte_hoch
+  - trigger: numeric_state
+    entity_id: sensor.thermodachboden_humidity
+    below: 64
+    id: feuchte_niedrig
+  - trigger: numeric_state
+    entity_id: sensor.gw1200a_outdoor_temperature
+    above: 2
+    id: temperatur_ok
+  - trigger: numeric_state
+    entity_id: sensor.gw1200a_outdoor_temperature
+    below: 2.01
+    id: temperatur_kalt
+  - trigger: time
+    at: 09:00:00
+    id: startzeit
+  - trigger: time
+    at: '17:00:00'
+    id: endzeit
+  - trigger: numeric_state
+    entity_id: sensor.gosund_1_entfeuchter_dach_energy_power
+    below: 100
+    id: leistung_niedrig
+  - trigger: state
+    entity_id: switch.gosund_1_entfeuchter_dach_gosund_1
+    from: 'off'
+    to: 'on'
+    id: eingeschaltet
+  - trigger: homeassistant
+    event: start
+    id: start
+  conditions: []
+  actions:
+  - choose:
+    - conditions:
+      - condition: or
+        conditions:
+        - condition: trigger
+          id: endzeit
+        - condition: trigger
+          id: leistung_niedrig
+        - condition: trigger
+          id: eingeschaltet
+        - condition: trigger
+          id: start
+      - condition: or
+        conditions:
+        - condition: time
+          before: 09:00:00
+        - condition: time
+          after: '17:00:00'
+      - condition: state
+        entity_id: switch.gosund_1_entfeuchter_dach_gosund_1
+        state: 'on'
+      - condition: numeric_state
+        entity_id: sensor.gosund_1_entfeuchter_dach_energy_power
+        below: 100
+      sequence:
+      - action: switch.turn_off
+        target:
+          entity_id: switch.gosund_1_entfeuchter_dach_gosund_1
+    - conditions:
+      - condition: trigger
+        id:
+        - temperatur_kalt
+        - startzeit
+        - start
+      - condition: time
+        after: 09:00:00
+        before: '17:00:00'
+      - condition: numeric_state
+        entity_id: sensor.gw1200a_outdoor_temperature
+        below: 2.01
+      sequence:
+      - action: switch.turn_off
+        target:
+          entity_id: switch.gosund_1_entfeuchter_dach_gosund_1
+    - conditions:
+      - condition: trigger
+        id:
+        - feuchte_niedrig
+        - startzeit
+        - start
+      - condition: time
+        after: 09:00:00
+        before: '17:00:00'
+      - condition: numeric_state
+        entity_id: sensor.thermodachboden_humidity
+        below: 64
+      sequence:
+      - action: switch.turn_off
+        target:
+          entity_id: switch.gosund_1_entfeuchter_dach_gosund_1
+    - conditions:
+      - condition: trigger
+        id:
+        - feuchte_hoch
+        - temperatur_ok
+        - startzeit
+        - start
+      - condition: time
+        after: 09:00:00
+        before: '17:00:00'
+      - condition: numeric_state
+        entity_id: sensor.gw1200a_outdoor_temperature
+        above: 2
+      - condition: numeric_state
+        entity_id: sensor.thermodachboden_humidity
+        above: 68
+      - condition: state
+        entity_id: switch.gosund_1_entfeuchter_dach_gosund_1
+        state: 'off'
+      sequence:
+      - action: switch.turn_on
+        target:
+          entity_id: switch.gosund_1_entfeuchter_dach_gosund_1
+  mode: single
+- id: '1788719611744'
+  alias: Dachboden Ventilator - Intervallbetrieb
+  description: 'Schaltet den Ventilator zwischen 09:00 und 17:59 Uhr zweimal pro Stunde
+    für jeweils vier Minuten ein.
+
+    '
+  triggers:
+  - trigger: time_pattern
+    minutes: '0'
+    seconds: '0'
+    id: einschalten
+  - trigger: time_pattern
+    minutes: '30'
+    seconds: '0'
+    id: einschalten
+  - trigger: time_pattern
+    minutes: '4'
+    seconds: '0'
+    id: ausschalten
+  - trigger: time_pattern
+    minutes: '34'
+    seconds: '0'
+    id: ausschalten
+  - trigger: homeassistant
+    event: start
+    id: start
+  conditions: []
+  actions:
+  - choose:
+    - conditions:
+      - condition: trigger
+        id: einschalten
+      - condition: time
+        after: 08:59:59
+        before: '18:00:00'
+      - condition: state
+        entity_id: switch.gosund_3_ventilator_dachboden_gosund_3
+        state: 'off'
+      sequence:
+      - action: switch.turn_on
+        target:
+          entity_id: switch.gosund_3_ventilator_dachboden_gosund_3
+    - conditions:
+      - condition: trigger
+        id: ausschalten
+      - condition: state
+        entity_id: switch.gosund_3_ventilator_dachboden_gosund_3
+        state: 'on'
+      sequence:
+      - action: switch.turn_off
+        target:
+          entity_id: switch.gosund_3_ventilator_dachboden_gosund_3
+    - conditions:
+      - condition: trigger
+        id: start
+      sequence:
+      - choose:
+        - conditions:
+          - condition: time
+            after: 08:59:59
+            before: '18:00:00'
+          - condition: template
+            value_template: '{% set m = now().minute %} {{ (0 <= m < 4) or (30 <=
+              m < 34) }}
+
+              '
+          sequence:
+          - action: switch.turn_on
+            target:
+              entity_id: switch.gosund_3_ventilator_dachboden_gosund_3
+        default:
+        - action: switch.turn_off
+          target:
+            entity_id: switch.gosund_3_ventilator_dachboden_gosund_3
+  mode: single
+- id: '1788722497377'
+  alias: Regenwasserpumpe - Laufzeitalarm
+  description: 'Alarmiert, wenn die Regenwasserpumpe länger als 15 Minuten ununterbrochen
+    mehr als 10 W aufnimmt.
+
+    '
+  triggers:
+  - trigger: numeric_state
+    entity_id: sensor.regenwasserpumpe_leistung
+    above: 10
+    for:
+      minutes: 15
+  conditions: []
+  actions:
+  - action: notify.pushover
+    data:
+      title: Pumpen-Alarm
+      message: '⚠️ Achtung: Die Regenwasserpumpe läuft seit über 15 Minuten ununterbrochen!'
+      data:
+        priority: 1
+  - action: telegram_bot.send_message
+    data:
+      chat_id:
+      - 173339841
+      - 770182243
+      message: '⚠️ Achtung: Die Regenwasserpumpe läuft seit über 15 Minuten ununterbrochen!'
+  mode: single
+- id: '1788769726696'
+  alias: Waschküche - Entfeuchter und Lüfter Steuerung
+  description: 'Hauptsteuerung für Entfeuchter und Lüfter in der Waschküche. Fenster
+    offen: Lüfter an und Entfeuchter aus. Fenster geschlossen: Lüfter nur bei aktivem
+    manuellen Timer. Entfeuchter wird zwischen 09:30 und 20:00 Uhr oder während des
+    manuellen 3-Stunden-Betriebs nach Luftfeuchtigkeit geregelt. Ereignisgesteuert
+    ohne Trigger bei jedem Feuchte-Update.
+
+    '
+  triggers:
+  - trigger: state
+    entity_id: binary_sensor.keller_waschkuche_fenster_kontakt
+    from: 'off'
+    to: 'on'
+    id: fenster_offen
+  - trigger: state
+    entity_id: binary_sensor.keller_waschkuche_fenster_kontakt
+    from: 'on'
+    to: 'off'
+    id: fenster_geschlossen
+  - trigger: numeric_state
+    entity_id: sensor.feuchte_waschkueche_am2301_humidity
+    above: 54.9
+    id: feuchte_hoch
+  - trigger: numeric_state
+    entity_id: sensor.feuchte_waschkueche_am2301_humidity
+    below: 50.1
+    id: feuchte_niedrig
+  - trigger: state
+    entity_id: timer.lufter_waschkuche_manuell
+    id: luefter_timer
+  - trigger: state
+    entity_id: input_boolean.entfeuchter_waschkueche_manuell
+    id: entfeuchter_manuell
+  - trigger: time
+    at: input_datetime.entfeuchter_waschkueche_manuell_ende
+    id: entfeuchter_manuell_ende
+  - trigger: time
+    at: 09:30:00
+    id: zeit_start
+  - trigger: time
+    at: '20:00:00'
+    id: zeit_ende
+  - trigger: homeassistant
+    event: start
+    id: ha_start
+  conditions: []
+  actions:
+  - if:
+    - condition: trigger
+      id:
+      - fenster_offen
+      - fenster_geschlossen
+    then:
+    - action: timer.cancel
+      target:
+        entity_id: timer.lufter_waschkuche_manuell
+  - if:
+    - condition: state
+      entity_id: binary_sensor.keller_waschkuche_fenster_kontakt
+      state: 'on'
+    then:
+    - if:
+      - condition: state
+        entity_id: switch.nous_4_ventilator_waschkuche
+        state: 'off'
+      then:
+      - action: switch.turn_on
+        target:
+          entity_id: switch.nous_4_ventilator_waschkuche
+    - if:
+      - condition: state
+        entity_id: switch.waschkucher_steckdoseentfeuchter
+        state: 'on'
+      then:
+      - action: switch.turn_off
+        target:
+          entity_id: switch.waschkucher_steckdoseentfeuchter
+    - stop: 'Fenster offen: Lüfter an, Entfeuchter aus'
+  - if:
+    - condition: state
+      entity_id: timer.lufter_waschkuche_manuell
+      state: active
+    then:
+    - if:
+      - condition: state
+        entity_id: switch.nous_4_ventilator_waschkuche
+        state: 'off'
+      then:
+      - action: switch.turn_on
+        target:
+          entity_id: switch.nous_4_ventilator_waschkuche
+    else:
+    - if:
+      - condition: state
+        entity_id: switch.nous_4_ventilator_waschkuche
+        state: 'on'
+      then:
+      - action: switch.turn_off
+        target:
+          entity_id: switch.nous_4_ventilator_waschkuche
+  - choose:
+    - conditions:
+      - condition: or
+        conditions:
+        - condition: time
+          after: 09:29:59
+          before: '20:00:00'
+        - condition: and
+          conditions:
+          - condition: state
+            entity_id: input_boolean.entfeuchter_waschkueche_manuell
+            state: 'on'
+          - condition: template
+            value_template: "{{\n  as_timestamp(\n    states('input_datetime.entfeuchter_waschkueche_manuell_ende'),\n
+              \   0\n  ) > as_timestamp(now())\n}}\n"
+      sequence:
+      - condition: template
+        value_template: "{{\n  is_number(\n    states('sensor.feuchte_waschkueche_am2301_humidity')\n
+          \ )\n}}\n"
+      - choose:
+        - conditions:
+          - condition: numeric_state
+            entity_id: sensor.feuchte_waschkueche_am2301_humidity
+            above: 54.9
+          - condition: state
+            entity_id: switch.waschkucher_steckdoseentfeuchter
+            state: 'off'
+          sequence:
+          - action: switch.turn_on
+            target:
+              entity_id: switch.waschkucher_steckdoseentfeuchter
+        - conditions:
+          - condition: numeric_state
+            entity_id: sensor.feuchte_waschkueche_am2301_humidity
+            below: 50.1
+          - condition: state
+            entity_id: switch.waschkucher_steckdoseentfeuchter
+            state: 'on'
+          sequence:
+          - action: switch.turn_off
+            target:
+              entity_id: switch.waschkucher_steckdoseentfeuchter
+    default:
+    - if:
+      - condition: state
+        entity_id: switch.waschkucher_steckdoseentfeuchter
+        state: 'on'
+      then:
+      - action: switch.turn_off
+        target:
+          entity_id: switch.waschkucher_steckdoseentfeuchter
+  mode: restart
+- id: '1788769844488'
+  alias: Waschküche - Lüfter Taster
+  description: 'Ein Tastendruck schaltet den Lüfter bei geschlossenem Fenster für
+    eine Stunde ein. Erneuter Tastendruck beendet den manuellen Betrieb.
+
+    '
+  triggers:
+  - trigger: state
+    entity_id: event.tasterluefter_action
+  conditions:
+  - condition: template
+    value_template: '{{ trigger.to_state.attributes.event_type == ''single'' }}
+
+      '
+  actions:
+  - if:
+    - condition: state
+      entity_id: binary_sensor.keller_waschkuche_fenster_kontakt
+      state: 'on'
+    then:
+    - stop: Fenster ist offen
+  - choose:
+    - conditions:
+      - condition: state
+        entity_id: switch.nous_4_ventilator_waschkuche
+        state: 'on'
+      sequence:
+      - action: timer.cancel
+        target:
+          entity_id: timer.luefter_waschkueche_manuell
+      - action: switch.turn_off
+        target:
+          entity_id: switch.nous_4_ventilator_waschkuche
+    default:
+    - action: timer.start
+      target:
+        entity_id: timer.luefter_waschkueche_manuell
+      data:
+        duration: 01:00:00
+    - action: switch.turn_on
+      target:
+        entity_id: switch.nous_4_ventilator_waschkuche
+  mode: restart
+- id: '1788771007498'
+  alias: Waschküche - Entfeuchter manueller Betrieb
+  description: 'Verwaltet die dreistündige manuelle Freigabe des Entfeuchters einschließlich
+    persistenter Endzeit.
+
+    '
+  triggers:
+  - trigger: state
+    entity_id:
+    - input_boolean.entfeuchter_waschkuche_manuell
+    to:
+    - 'on'
+    id: eingeschaltet
+  - trigger: state
+    entity_id:
+    - input_boolean.entfeuchter_waschkuche_manuell
+    to:
+    - 'off'
+    id: ausgeschaltet
+  - trigger: time
+    at: input_datetime.entfeuchter_waschkueche_manuell_ende
+    id: abgelaufen
+  - trigger: homeassistant
+    event: start
+    id: ha_start
+  conditions: []
+  actions:
+  - choose:
+    - conditions:
+      - condition: trigger
+        id: eingeschaltet
+      sequence:
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.entfeuchter_waschkueche_manuell_ende
+        data:
+          timestamp: '{{ (now() + timedelta(hours=3)).timestamp() }}
+
+            '
+    - conditions:
+      - condition: trigger
+        id: abgelaufen
+      - condition: state
+        entity_id: input_boolean.entfeuchter_waschkueche_manuell
+        state: 'on'
+      sequence:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.entfeuchter_waschkueche_manuell
+    - conditions:
+      - condition: trigger
+        id: ha_start
+      - condition: state
+        entity_id: input_boolean.entfeuchter_waschkueche_manuell
+        state: 'on'
+      - condition: template
+        value_template: "{{\n  as_timestamp(\n    states('input_datetime.entfeuchter_waschkueche_manuell_ende'),\n
+          \   0\n  ) <= as_timestamp(now())\n}}\n"
+      sequence:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.entfeuchter_waschkueche_manuell
+  mode: restart
+- id: '1788794888507'
+  alias: NSPanel Easy Configuration (v2026.9.10)
+  description: ''
+  use_blueprint:
+    path: edwardtfn/nspanel_easy_blueprint.yaml
+    input:
+      nspanel_name: 3a9eb6dc3f27e28478d607baf216a99e
+      time_format: '%H:%M'
+      date_format: '%a, %d %b'
+      decimal_separator: ','
+      sun_zone: zone.home
+      weather_entity: weather.forecast_home
+      outdoortemp: sensor.gw1200a_outdoor_temperature
+      button_page01_label: Rollläden OG
+      entity02: cover.claudiarolllade
+      entity01_name: Andreas
+      entity01_icon: mdi:blinds
+      entity02_name: Claudia
+      entity02_icon: mdi:blinds
+      entity03: cover.schlafzimmerrolllade
+      entity03_name: Schlafzimmer
+      entity03_icon: mdi:blinds
+      entity04: cover.badezimmerrolllade
+      entity04_name: Badezimmer
+      entity04_icon: mdi:blinds
+      entity01_custom_action:
+      - choose:
+        - conditions:
+          - condition: state
+            entity_id: cover.andreasrolllade
+            state:
+            - opening
+          sequence:
+          - action: cover.stop_cover
+            metadata: {}
+            target:
+              entity_id: cover.andreasrolllade
+            data: {}
+        - conditions:
+          - condition: state
+            entity_id: cover.andreasrolllade
+            state:
+            - closing
+          sequence:
+          - action: cover.stop_cover
+            metadata: {}
+            target:
+              entity_id: cover.andreasrolllade
+            data: {}
+        default:
+        - action: cover.toggle
+          metadata: {}
+          target:
+            entity_id: cover.andreasrolllade
+          data: {}
+      home_value01: sensor.solarlog_ac_leistung
+      home_value01_icon: mdi:solar-power-variant-outline
+      home_value02: sensor.offene_fenster_und_turen
+      home_value02_icon: mdi:window-open-variant
+      home_indoor_temp_visible: false
+      screensaver_display_time_font_color:
+      - 223
+      - 17
+      - 17
+      screensaver_display_time_font_size: '12'
+- id: '1788799022347'
+  alias: NSPanel3 - Tagbetrieb
+  description: Display morgens einschalten und tagsüber dauerhaft aktiv halten
+  triggers:
+  - trigger: time
+    at: 06:30:00
+  actions:
+  - action: number.set_value
+    target:
+      entity_id: number.nspanel3_display_brightness
+    data:
+      value: 40
+  - action: number.set_value
+    target:
+      entity_id: number.nspanel3_display_brightness_sleep
+    data:
+      value: 40
+  - action: number.set_value
+    target:
+      entity_id: number.nspanel3_timeout_sleep
+    data:
+      value: 0
+  mode: single
+- id: '1788799056654'
+  alias: NSPanel3 - Nachtbetrieb
+  description: Display nachts ausschalten
+  triggers:
+  - trigger: time
+    at: '23:00:00'
+  actions:
+  - action: number.set_value
+    target:
+      entity_id: number.nspanel3_display_brightness_sleep
+    data:
+      value: 0
+  - action: number.set_value
+    target:
+      entity_id: number.nspanel3_timeout_sleep
+    data:
+      value: 60
+  mode: single
+- id: '1788804582666'
+  alias: Stehlampe Wohnzimmer - Dämmerungsautomatik
+  description: 'Schaltet die Wohnzimmer-Stehlampe bei Dunkelheit automatisch ein.
+    Manuell eingeschaltete Lampen werden bei steigender Helligkeit nicht automatisch
+    ausgeschaltet. Die abendliche Ausschaltzeit variiert zufällig zwischen 22:55 und
+    23:15 Uhr.
+
+    '
+  triggers:
+  - trigger: numeric_state
+    entity_id: sensor.wettersensor_smart_brightness
+    below: 481
+    id: dunkel
+  - trigger: numeric_state
+    entity_id: sensor.wettersensor_smart_brightness
+    above: 680
+    id: hell
+  - trigger: time_pattern
+    minutes: /2
+    id: pruefen
+  - trigger: time
+    at: '15:00:00'
+    id: start
+  - trigger: time
+    at: '22:55:00'
+    id: nacht
+  actions:
+  - choose:
+    - conditions:
+      - condition: trigger
+        id: nacht
+      sequence:
+      - delay:
+          seconds: '{{ range(0, 1201) | random }}'
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.stehlampe_wohnzimmer_automatik_aktiv
+      - action: light.turn_off
+        target:
+          entity_id: light.fernsehecke_stehlampe
+    - conditions:
+      - condition: trigger
+        id:
+        - dunkel
+        - pruefen
+        - start
+      - condition: time
+        after: '15:00:00'
+        before: '23:00:00'
+      - condition: numeric_state
+        entity_id: sensor.wettersensor_smart_brightness
+        below: 481
+      - condition: state
+        entity_id: light.fernsehecke_stehlampe
+        state: 'off'
+      - condition: state
+        entity_id: input_boolean.stehlampe_wohnzimmer_automatik_aktiv
+        state: 'off'
+      sequence:
+      - action: light.turn_on
+        target:
+          entity_id: light.fernsehecke_stehlampe
+        data:
+          brightness_pct: 85
+      - delay:
+          seconds: 1
+      - if:
+        - condition: state
+          entity_id: light.fernsehecke_stehlampe
+          state: 'on'
+        then:
+        - action: input_boolean.turn_on
+          target:
+            entity_id: input_boolean.stehlampe_wohnzimmer_automatik_aktiv
+    - conditions:
+      - condition: trigger
+        id:
+        - hell
+        - pruefen
+      - condition: time
+        after: '15:00:00'
+        before: '23:00:00'
+      - condition: numeric_state
+        entity_id: sensor.wettersensor_smart_brightness
+        above: 680
+      - condition: state
+        entity_id: input_boolean.stehlampe_wohnzimmer_automatik_aktiv
+        state: 'on'
+      sequence:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.stehlampe_wohnzimmer_automatik_aktiv
+      - action: light.turn_off
+        target:
+          entity_id: light.fernsehecke_stehlampe
+  mode: single
+- id: '1788805413550'
+  alias: Stehlampe Flur OG - Helligkeitsautomatik
+  description: 'Steuert light.empore_flur anhand der Außenhelligkeit. EIN bei <= 60
+    Lux mit 90 % Helligkeit. AUS bei >= 100 Lux. Manuelles Ausschalten während einer
+    automatischen Dunkelphase sperrt das Wiedereinschalten bis zur nächsten Hellphase.
+    Abends wird die Lampe zufällig zwischen 22:05 und 22:15 Uhr ausgeschaltet.
+
+    '
+  triggers:
+  - trigger: numeric_state
+    entity_id: sensor.wettersensor_smart_brightness
+    below: 61
+    id: dunkel
+  - trigger: numeric_state
+    entity_id: sensor.wettersensor_smart_brightness
+    above: 99
+    id: hell
+  - trigger: time
+    at: '15:00:00'
+    id: tagesreset
+  - trigger: time
+    at: '22:05:00'
+    id: abend
+  - trigger: state
+    entity_id: light.empore_flur
+    from: 'on'
+    to: 'off'
+    id: lampe_aus
+  - trigger: homeassistant
+    event: start
+    id: start
+  actions:
+  - choose:
+    - conditions:
+      - condition: trigger
+        id: tagesreset
+      sequence:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.stehlampe_flur_og_manuelle_sperre
+      - if:
+        - condition: numeric_state
+          entity_id: sensor.wettersensor_smart_brightness
+          below: 61
+        - condition: state
+          entity_id: light.empore_flur
+          state: 'off'
+        then:
+        - action: light.turn_on
+          target:
+            entity_id: light.empore_flur
+          data:
+            brightness_pct: 90
+            transition: 0.1
+    - conditions:
+      - condition: trigger
+        id: dunkel
+      - condition: time
+        after: '15:00:00'
+        before: '22:00:00'
+      - condition: state
+        entity_id: light.empore_flur
+        state: 'off'
+      - condition: state
+        entity_id: input_boolean.stehlampe_flur_og_manuelle_sperre
+        state: 'off'
+      sequence:
+      - action: light.turn_on
+        target:
+          entity_id: light.empore_flur
+        data:
+          brightness_pct: 90
+          transition: 0.1
+    - conditions:
+      - condition: trigger
+        id: hell
+      sequence:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.stehlampe_flur_og_manuelle_sperre
+      - if:
+        - condition: time
+          after: '15:00:00'
+          before: '22:00:00'
+        - condition: state
+          entity_id: light.empore_flur
+          state: 'on'
+        then:
+        - action: light.turn_off
+          target:
+            entity_id: light.empore_flur
+          data:
+            transition: 0.5
+    - conditions:
+      - condition: trigger
+        id: lampe_aus
+      - condition: time
+        after: '15:00:00'
+        before: '22:00:00'
+      - condition: numeric_state
+        entity_id: sensor.wettersensor_smart_brightness
+        below: 61
+      sequence:
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.stehlampe_flur_og_manuelle_sperre
+    - conditions:
+      - condition: trigger
+        id: start
+      - condition: time
+        after: '15:00:00'
+        before: '22:00:00'
+      - condition: numeric_state
+        entity_id: sensor.wettersensor_smart_brightness
+        below: 61
+      - condition: state
+        entity_id: light.empore_flur
+        state: 'off'
+      - condition: state
+        entity_id: input_boolean.stehlampe_flur_og_manuelle_sperre
+        state: 'off'
+      sequence:
+      - action: light.turn_on
+        target:
+          entity_id: light.empore_flur
+        data:
+          brightness_pct: 90
+          transition: 0.1
+    - conditions:
+      - condition: trigger
+        id: abend
+      sequence:
+      - delay:
+          seconds: '{{ range(0, 601) | random }}'
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.stehlampe_flur_og_manuelle_sperre
+      - action: light.turn_off
+        target:
+          entity_id: light.empore_flur
+        data:
+          transition: 0.5
+  mode: parallel
+  max: 10

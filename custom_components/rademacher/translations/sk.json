@@ -1,0 +1,64 @@
+{
+  "title": "Rademacher HomePilot",
+  "options": {
+    "step": {
+      "init": {
+        "title": "Konfigurácia",
+        "description": "",
+        "data": {
+          "exclude": "VYLÚČIŤ zariadenia (vyberte zariadenia, ktoré NECHCETE pridať):",
+          "sensor_type": "Vyberte kontaktné senzory s naklonenou polohou:",
+          "enable_cyclic_scene_polling": "Povoliť cyklické dotazovanie scén",
+          "create_scene_activation_entities": "Vytvoriť entity aktivácie scén",
+          "include_non_executable_scenes": "Zahrnúť nevykonateľné scény",
+          "update_interval": "Interval aktualizácie (5–120 s)",
+          "scene_update_interval": "Interval aktualizácie scén (10–120 s)",
+          "create_inverted_cover_position": "Vytvoriť senzory polohy krytu s invertovanou pozíciou"
+        }
+      }
+    }
+  },
+  "config": {
+    "step": {
+      "user": {
+        "title": "Zadajte názov hostiteľa/IP adresu Bridge",
+        "description": "Zadajte názov hostiteľa alebo IP adresu a heslo vášho Rademacher Bridge (Start2Smart alebo Homepilot).",
+        "data": {
+          "host": "Názov hostiteľa/IP adresa"
+        }
+      },
+      "user_password": {
+        "title": "Zadajte heslo Bridge",
+        "description": "Zadajte heslo svojho Rademacher Bridge (Start2Smart alebo Homepilot).",
+        "data": {
+          "password": "Heslo"
+        }
+      },
+      "config": {
+        "title": "Konfigurácia",
+        "description": "",
+        "data": {
+          "exclude": "VYLÚČIŤ zariadenia (vyberte zariadenia, ktoré NECHCETE pridať):",
+          "sensor_type": "Vyberte kontaktné senzory s naklonenou polohou:",
+          "include_non_executable_scenes": "Zahrnúť nevykonateľné scény",
+          "enable_cyclic_scene_polling": "Povoliť cyklické dotazovanie scén",
+          "create_scene_activation_entities": "Vytvoriť entity aktivácie scén",
+          "update_interval": "Interval aktualizácie (5–120 s)",
+          "scene_update_interval": "Interval aktualizácie scén (10–120 s)",
+          "create_inverted_cover_position": "Vytvoriť senzory polohy krytu s invertovanou pozíciou"
+        }
+      }
+    },
+    "error": {
+      "no_device_selected": "Musíte vybrať aspoň jedno zariadenie.",
+      "cannot_connect": "Chyba pri pripájaní k bridge. Skontrolujte, či je bridge pripojený k sieti a či je názov hostiteľa/IP správna.",
+      "auth_error": "Nesprávne heslo. Skontrolujte, či je zadané heslo správne.",
+      "unknown": "Neznáma výnimka."
+    },
+    "abort": {
+      "no_devices_found": "Nenašli sa žiadne zariadenia.",
+      "cannot_connect": "Chyba pri pripájaní k bridge. Skontrolujte, či je bridge pripojený k sieti a či je názov hostiteľa/IP správna.",
+      "reauth_successful": "Opätovná autentifikácia bola úspešná."
+    }
+  }
+}

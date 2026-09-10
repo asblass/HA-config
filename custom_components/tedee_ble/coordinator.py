@@ -1,0 +1,1162 @@
+"""Coordinator for Tedee BLE lock integration.
+
+Manages BLE connection lifecycle, notification handling, polling,
+certificate refresh, and command dispatch.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from datetime import timedelta
+import logging
+import time
+
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+    HomeAssistantError,
+)
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+from homeassistant.components.bluetooth import (
+    BluetoothCallbackMatcher,
+    BluetoothScanningMode,
+    async_address_present,
+    async_ble_device_from_address,
+    async_discovered_service_info,
+    async_process_advertisements,
+)
+from homeassistant.helpers import device_registry as dr, entity_registry as er
+
+from .const import (
+    CERT_CHECK_INTERVAL_SECONDS,
+    CONF_ADDRESS,
+    CONF_API_KEY,
+    CONF_CERT_EXPIRATION,
+    CONF_CERTIFICATE,
+    CONF_DEVICE_ID,
+    CONF_DEVICE_PUBLIC_KEY,
+    CONF_FIRMWARE_VERSION,
+    CONF_HAS_DOOR_SENSOR,
+    CONF_LOCK_MODEL,
+    CONF_LOCK_NAME,
+    CONF_MOBILE_ID,
+    CONF_PRIVATE_KEY_PEM,
+    CONF_SERIAL,
+    CONF_SIGNED_TIME,
+    CONF_UPDATE_AVAILABLE,
+    CONF_USER_MAP,
+    ADVERTISEMENT_WAIT_SECONDS,
+    DOMAIN,
+    resolve_lock_model,
+    EVENT_LOCK_ACTION,
+    FIRMWARE_REBOOT_WINDOW_SECONDS,
+    FIRMWARE_REFRESH_DELAYS,
+    KEEPALIVE_INTERVAL_SECONDS,
+    POLL_INTERVAL_SECONDS,
+    PROXY_EXHAUSTED_DELAY_INDEX,
+    RECONNECT_DELAYS,
+    UNAVAILABLE_GRACE_SECONDS,
+)
+from .tedee_lib.ble import TedeeBLETransport, serial_to_service_uuid
+from .tedee_lib.cloud_api import CloudAPIError, TedeeCloudAPI, certificate_needs_refresh
+from .tedee_lib.crypto import pem_to_private_key
+from .tedee_lib.lock_commands import (
+    CommandError,
+    DOOR_STATE_UNKNOWN,
+    LOCK_STATE_LOCKED,
+    LOCK_STATE_LOCKING,
+    LOCK_STATE_NAMES,
+    LOCK_STATE_PULL_SPRING,
+    LOCK_STATE_PULLING,
+    LOCK_STATE_UNLOCKED,
+    LOCK_STATE_UNKNOWN,
+    LOCK_STATE_UNLOCKING,
+    LOCK_STATE_UPDATING,
+    STATUS_OK,
+    TRANSITIONAL_LOCK_STATES,
+    UNLOCK_NO_PULL,
+    UNLOCK_NONE,
+    TedeeLock,
+)
+from .tedee_lib.ptls import (
+    ALERT_INVALID_CERTIFICATE,
+    ALERT_NO_TRUSTED_TIME,
+    PTLSAlertError,
+    PTLSSession,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@callback
+def async_remove_stale_entity(
+    hass: HomeAssistant, platform: str, unique_id: str
+) -> None:
+    """Drop an entity this configuration should not have.
+
+    Simply not adding it is not enough: the registry entry survives, and HA
+    then shows it as "no longer being provided" — still unavailable, still
+    cluttering the device page and the battery dashboard. The quality-scale
+    `dynamic-devices` rule prescribes removal, so remove it.
+    """
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id(platform, DOMAIN, unique_id)
+    if entity_id is None:
+        return
+    logger.debug("Removing stale entity %s", entity_id)
+    registry.async_remove(entity_id)
+
+
+@dataclass
+class TedeeState:
+    """Current state of the Tedee lock."""
+
+    lock_state: int = LOCK_STATE_UNKNOWN
+    lock_status: int = STATUS_OK  # 0=ok, 1=jammed
+    door_state: int = DOOR_STATE_UNKNOWN
+    battery_level: int | None = None
+    battery_charging: bool = False
+    # Paired-accessory battery (door sensor). Push-only — there is no GET
+    # command for it — so this stays None until the lock volunteers a 0xD5.
+    accessory_battery_level: int | None = None
+    accessory_battery_id: int | None = None
+    accessory_battery_timestamp: int | None = None
+    available: bool = False
+    last_trigger: str = "unknown"  # What caused the last state change
+    last_user: str = "N/A"  # Who triggered the last action
+    last_event_id: int = 0  # Incremented on each lock action event
+    last_event_type: str = ""  # e.g. "locked", "unlocked"
+
+
+class TedeeCoordinator(DataUpdateCoordinator[TedeeState]):
+    """Coordinator for a single Tedee BLE lock."""
+
+    config_entry: ConfigEntry
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        """Initialize coordinator."""
+        super().__init__(
+            hass,
+            logger,
+            name=f"Tedee {entry.data.get(CONF_LOCK_NAME, 'Lock')}",
+            update_interval=timedelta(seconds=POLL_INTERVAL_SECONDS),
+        )
+        self.entry = entry
+
+        # BLE/session objects
+        self._transport: TedeeBLETransport | None = None
+        self._session: PTLSSession | None = None
+        self._lock: TedeeLock | None = None
+
+        # Connection management
+        self._connecting_lock = asyncio.Lock()
+        self._command_lock = asyncio.Lock()
+        self._notification_task: asyncio.Task | None = None
+        self._reconnect_task: asyncio.Task | None = None
+        self._reconnect_attempt: int = 0
+        self._shutting_down: bool = False
+
+        # Door-sensor detection reloads the entry once at most, so a probe and a
+        # push that disagree cannot start a reload loop. See _set_has_door_sensor.
+        self._reloaded_for_door_sensor: bool = False
+
+        # Certificate check timing
+        self._last_cert_check: float = 0
+
+        # BLE activity tracking for keep-alive
+        self._last_ble_activity: float = 0.0
+        self._disconnect_time: float | None = None
+
+        # Firmware-update tracking. When the lock reports UPDATING it will soon
+        # reboot and change its BLE MAC; we use this to reconnect aggressively
+        # (fast retries + rediscover by serial) instead of backing off as if the
+        # proxy were out of connection slots.
+        self._firmware_updating: bool = False
+        self._firmware_update_since: float | None = None
+
+        # State
+        self.state = TedeeState()
+
+        # Entity ID for logbook (set by lock entity in async_added_to_hass)
+        self.lock_entity_id: str | None = None
+
+    @property
+    def device_id(self) -> int:
+        return self.entry.data[CONF_DEVICE_ID]
+
+    @property
+    def serial(self) -> str:
+        return self.entry.data.get(CONF_SERIAL, "")
+
+    @property
+    def lock_name(self) -> str:
+        return self.entry.data.get(CONF_LOCK_NAME, "Lock")
+
+    @property
+    def is_connected(self) -> bool:
+        return (
+            self._transport is not None
+            and self._transport.is_connected
+            and self._session is not None
+            and self._session.is_established
+        )
+
+    def _observe_door_state(self, door_state: int) -> None:
+        """Apply a door reading and record what it proves about a paired sensor.
+
+        An OPEN or CLOSED reading is the only sound evidence available over BLE
+        that a door sensor is paired. Notably the 0xD5 accessory-battery push is
+        *not* — it carries an accessory id but no type, and the same opcode
+        serves keypads, gates and dry contacts.
+        """
+        if door_state == DOOR_STATE_UNKNOWN:
+            return
+        self.state.door_state = door_state
+        self._set_has_door_sensor(True)
+
+    def _note_door_sensor_absent(self) -> None:
+        """Record that the lock says it has no door data.
+
+        Only call this when the lock actually answered — either SUCCESS with
+        UNKNOWN, or a CommandError, which is the firmware rejecting the command
+        rather than a transport problem. A lock with a paired sensor answers
+        OPEN or CLOSED, so both of those mean no sensor. Timeouts and dropped
+        connections raise other exception types and must never land here; that
+        is the transient failure the old never-clear rule was guarding against.
+        """
+        if self.entry.state is ConfigEntryState.LOADED:
+            # A mid-session reconnect. The entities are live and possibly in
+            # use, and a probe that contradicts what this session already saw
+            # is likelier a blip than an unpairing — let the next reload settle
+            # it. During the setup connect (including a reload, which is how
+            # someone who just unpaired a sensor will trigger this) the probe
+            # is the authority: everything read before it in the connect
+            # sequence is a cached door value that may predate the unpairing.
+            return
+        self._set_has_door_sensor(False)
+
+    def _set_has_door_sensor(self, present: bool) -> None:
+        """Persist whether a door sensor is paired, reloading if it changed.
+
+        The flag is derived fresh on every connect rather than latched once, so
+        installs that were wrongly flagged correct themselves without needing a
+        config-entry migration.
+        """
+        if self.entry.data.get(CONF_HAS_DOOR_SENSOR, False) == present:
+            return
+        logger.info(
+            "Door sensor %s on %s",
+            "detected" if present else "no longer detected",
+            self.lock_name,
+        )
+        self.hass.config_entries.async_update_entry(
+            self.entry, data={**self.entry.data, CONF_HAS_DOOR_SENSOR: present}
+        )
+
+        # During setup the platforms have not been forwarded yet, so the new
+        # value is picked up without any reload. Once loaded, only a reload can
+        # add the door entities — worth it for someone who just paired a sensor.
+        #
+        # Reload on the positive only. If a probe and a 0xBA push ever disagreed
+        # about the door, reloading on both edges would let them trade the flag
+        # back and forth and reconnect the lock every time; clearing it can wait
+        # for the next natural reload instead. `_reloaded_for_door_sensor` caps
+        # it at one reload per connection lifetime as a second backstop.
+        if (
+            present
+            and not self._reloaded_for_door_sensor
+            and self.entry.state is ConfigEntryState.LOADED
+        ):
+            self._reloaded_for_door_sensor = True
+            self.hass.config_entries.async_schedule_reload(self.entry.entry_id)
+
+    def _migrate_lock_model(self) -> None:
+        """Refresh the stored model name from the serial.
+
+        Entries created before GO 2 detection existed were saved as plain "GO".
+        The serial is authoritative, so recompute and correct in place.
+        """
+        serial = self.serial
+        if not serial:
+            return
+        resolved = resolve_lock_model(None, serial)
+        if resolved == "Lock" or resolved == self.entry.data.get(CONF_LOCK_MODEL):
+            return
+        logger.info(
+            "Correcting model for %s: %s -> %s",
+            self.lock_name, self.entry.data.get(CONF_LOCK_MODEL), resolved,
+        )
+        self.hass.config_entries.async_update_entry(
+            self.entry, data={**self.entry.data, CONF_LOCK_MODEL: resolved}
+        )
+        dev_reg = dr.async_get(self.hass)
+        device = dev_reg.async_get_device(identifiers={(DOMAIN, str(self.device_id))})
+        if device:
+            dev_reg.async_update_device(device.id, model=resolved)
+
+    async def async_setup(self) -> None:
+        """Set up the coordinator — connect to the lock."""
+        self._migrate_lock_model()
+
+        if not self.entry.data.get(CONF_FIRMWARE_VERSION):
+            try:
+                await self._refresh_firmware_info()
+            except Exception:
+                logger.debug("Firmware info fetch failed", exc_info=True)
+
+        try:
+            await self._connect()
+        except asyncio.CancelledError:
+            logger.warning("Setup of %s was cancelled, will retry", self.lock_name)
+            raise ConfigEntryNotReady(
+                f"Connection to {self.lock_name} was cancelled (device may be updating)"
+            )
+        except Exception as err:
+            logger.error("Failed to connect to %s: %s", self.lock_name, err)
+            raise ConfigEntryNotReady(
+                f"Could not connect to {self.lock_name}: {err}"
+            ) from err
+
+    async def async_shutdown(self) -> None:
+        """Shut down the coordinator."""
+        self._shutting_down = True
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+        if self._notification_task and not self._notification_task.done():
+            self._notification_task.cancel()
+        await self._disconnect()
+        await super().async_shutdown()
+
+    def _resolve_ble_device(self, address: str) -> object:
+        """Resolve BLEDevice from HA Bluetooth stack, fall back to address string."""
+        # During a firmware reboot the MAC changes, so the stored address is
+        # likely stale — connecting to it wastes a long timeout. Prefer whatever
+        # address is currently advertising this lock's serial.
+        if self._in_firmware_reboot_window():
+            rediscovered = self._rediscover_by_serial()
+            if rediscovered:
+                new_address = rediscovered.address.upper()
+                if new_address != address.upper():
+                    logger.warning(
+                        "MAC for %s changed during firmware update: %s -> %s",
+                        self.lock_name, address, new_address,
+                    )
+                    self._update_stored_address(new_address)
+                return rediscovered
+
+        ble_device = async_ble_device_from_address(self.hass, address, connectable=True)
+        if ble_device:
+            logger.debug("Resolved BLEDevice: %s", ble_device.name)
+            return ble_device
+
+        # MAC not found — try rediscovering by serial number
+        ble_device = self._rediscover_by_serial()
+        if ble_device:
+            new_address = ble_device.address.upper()
+            logger.warning(
+                "MAC address for %s changed: %s -> %s",
+                self.lock_name, address, new_address,
+            )
+            self._update_stored_address(new_address)
+            return ble_device
+
+        logger.debug("BLEDevice not found, using address string")
+        return address
+
+    def _rediscover_by_serial(self) -> object | None:
+        """Search HA's discovered devices for the lock by its service UUID."""
+        serial = self.serial
+        if not serial:
+            return None
+        try:
+            target_uuid = serial_to_service_uuid(serial).lower()
+        except ValueError:
+            return None
+        for info in async_discovered_service_info(self.hass):
+            if target_uuid in [str(u).lower() for u in info.service_uuids]:
+                logger.debug("Rediscovered %s at %s via service UUID", self.lock_name, info.address)
+                return info.device
+        return None
+
+    async def _wait_for_advertisement(self) -> object | None:
+        """Wait for the lock to advertise and return its current BLEDevice.
+
+        Unlike the cache lookups above, this genuinely waits for a *fresh*
+        advertisement (and asks HA for an active scan while it waits). That is
+        what a firmware update needs: the lock reboots onto a new BLE MAC and
+        is absent from HA's discovery cache until it advertises again.
+
+        This replaces an earlier BleakScanner.discover() call, which could
+        never have worked here: habluetooth rebinds bleak.BleakScanner to
+        HaBleakScannerWrapper, whose discover() ignores its timeout and returns
+        the very same cache _rediscover_by_serial() has already searched.
+        """
+        serial = self.serial
+        if not serial:
+            return None
+        try:
+            target_uuid = serial_to_service_uuid(serial).lower()
+        except ValueError:
+            return None
+
+        logger.info(
+            "Waiting up to %ds for %s to advertise (UUID: %s)...",
+            ADVERTISEMENT_WAIT_SECONDS, self.lock_name, target_uuid,
+        )
+        try:
+            info = await async_process_advertisements(
+                self.hass,
+                lambda service_info: True,
+                BluetoothCallbackMatcher(
+                    service_uuid=target_uuid, connectable=True
+                ),
+                BluetoothScanningMode.ACTIVE,
+                ADVERTISEMENT_WAIT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.debug(
+                "%s did not advertise within %ds",
+                self.lock_name, ADVERTISEMENT_WAIT_SECONDS,
+            )
+            return None
+        logger.info("%s advertised at %s", self.lock_name, info.address)
+        return info.device
+
+    async def _retry_at_new_address(self, source: str, device: object | None) -> bool:
+        """Connect at `device`'s address if it differs from the stored one.
+
+        Returns True when the lock turned up at a new MAC and the connect
+        succeeded, False when there was nothing new to try. A connect failure
+        at the new address propagates.
+        """
+        if device is None:
+            return False
+        old_address = self.entry.data[CONF_ADDRESS]
+        new_address = device.address.upper()
+        if new_address == old_address.upper():
+            return False
+        logger.warning(
+            "MAC address for %s changed: %s -> %s (via %s)",
+            self.lock_name, old_address, new_address, source,
+        )
+        self._update_stored_address(new_address)
+        self._transport = TedeeBLETransport(
+            device,
+            disconnect_callback=self._on_disconnect,
+        )
+        await self._transport.connect()
+        return True
+
+    def _update_stored_address(self, new_address: str) -> None:
+        """Persist a new MAC address to the config entry."""
+        new_data = {**self.entry.data}
+        new_data[CONF_ADDRESS] = new_address
+        self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+
+    def _track_firmware_state(self, lock_state: int) -> None:
+        """Note whether the lock is applying a firmware update.
+
+        A firmware update reboots the lock and changes its BLE MAC. Connect
+        failures during that window report the same "no connection slot / device
+        not reachable" error as real proxy exhaustion, so without this we'd back
+        off for 5 minutes. Tracking UPDATING lets the reconnect path stay fast.
+        """
+        if lock_state == LOCK_STATE_UPDATING:
+            if not self._firmware_updating:
+                logger.info("%s is applying a firmware update", self.lock_name)
+            self._firmware_updating = True
+            self._firmware_update_since = time.monotonic()
+        elif self._firmware_updating and lock_state != LOCK_STATE_UNKNOWN:
+            logger.info("%s firmware update complete", self.lock_name)
+            self._firmware_updating = False
+            self._firmware_update_since = None
+            self.hass.async_create_task(
+                self._refresh_firmware_after_update(
+                    self.entry.data.get(CONF_FIRMWARE_VERSION, "")
+                )
+            )
+
+    def _apply_observed_state(
+        self, lock_state: int, status: int, door_state: int
+    ) -> None:
+        """Apply a state read from get_state (connect, keep-alive or poll).
+
+        These reads carry no trigger or user, so those are left as they are —
+        whatever started a transition is still what finished it.
+
+        `last_event_type` must advance though. The lock announces LOCKING and
+        then LOCKED ~5s later; if the connection drops in between, that second
+        notification never arrives and the next state read is the only thing
+        that knows the move completed. Without this the entity reads `locked`
+        while `last_action` stays frozen at "locking".
+        """
+        prev_lock_state = self.state.lock_state
+
+        self.state.lock_state = lock_state
+        self.state.lock_status = status
+        self._track_firmware_state(lock_state)
+        self._observe_door_state(door_state)
+
+        # Only stand in for a *missed terminal* notification: settling out of a
+        # transitional state. Anything else (including the first read after
+        # setup, from LOCK_STATE_UNKNOWN) is not an event we failed to see.
+        if (
+            lock_state != prev_lock_state
+            and prev_lock_state in TRANSITIONAL_LOCK_STATES
+            and lock_state not in TRANSITIONAL_LOCK_STATES
+        ):
+            self.state.last_event_type = LOCK_STATE_NAMES.get(
+                lock_state, f"0x{lock_state:02x}"
+            ).lower()
+            self.state.last_event_id += 1
+            logger.info(
+                "Missed the %s notification for %s (was %s) — recovered from a "
+                "state read",
+                self.state.last_event_type,
+                self.lock_name,
+                LOCK_STATE_NAMES.get(prev_lock_state, f"0x{prev_lock_state:02x}"),
+            )
+            self.hass.bus.async_fire(EVENT_LOCK_ACTION, {
+                "entity_id": self.lock_entity_id,
+                "lock_name": self.lock_name,
+                "action": self.state.last_event_type,
+                "trigger": self.state.last_trigger,
+                "user": self.state.last_user,
+            })
+        elif lock_state != prev_lock_state and prev_lock_state == LOCK_STATE_UPDATING:
+            # Back from a firmware update: the reboot ate the announcement, so
+            # advance last_action. No event fired — nobody acted, and a phantom
+            # "locked" would land in the logbook. Trigger/user from the UPDATING
+            # notification don't describe this, so they reset.
+            self.state.last_event_type = LOCK_STATE_NAMES.get(
+                lock_state, f"0x{lock_state:02x}"
+            ).lower()
+            self.state.last_trigger = "unknown"
+            self.state.last_user = "N/A"
+
+    def _in_firmware_reboot_window(self) -> bool:
+        """True if the lock is (or just was) updating, within the reboot window."""
+        if not self._firmware_updating or self._firmware_update_since is None:
+            return False
+        return (
+            time.monotonic() - self._firmware_update_since
+            < FIRMWARE_REBOOT_WINDOW_SECONDS
+        )
+
+    async def _connect(self) -> None:
+        """Full connection sequence: cert refresh → BLE → PTLS → init."""
+        async with self._connecting_lock:
+            if self.is_connected:
+                logger.debug("Already connected to %s, skipping", self.lock_name)
+                return
+
+            logger.info("Connecting to %s (%s)...", self.lock_name, self.entry.data[CONF_ADDRESS])
+
+            # Refresh certificate if needed
+            await self._refresh_certificate_if_needed()
+
+            data = self.entry.data
+
+            # Create BLE transport
+            ble_device = self._resolve_ble_device(data[CONF_ADDRESS])
+            self._transport = TedeeBLETransport(
+                ble_device,
+                disconnect_callback=self._on_disconnect,
+            )
+            try:
+                await self._transport.connect()
+            except Exception as connect_err:
+                # The stored MAC can be stale — most often because a firmware
+                # update rebooted the lock onto a new BLE address. Check HA's
+                # discovery cache first, since that costs nothing.
+                recovered = await self._retry_at_new_address(
+                    "discovery cache", self._rediscover_by_serial()
+                )
+                if not recovered and not async_address_present(
+                    self.hass, data[CONF_ADDRESS], connectable=True
+                ):
+                    # HA cannot see the lock at its stored address at all, so a
+                    # changed MAC is plausible and waiting for an advertisement
+                    # can pay off. When the address IS still present the MAC is
+                    # fine and the failure was something else (no free proxy
+                    # slot, timeout) — don't stall the retry ladder on it.
+                    recovered = await self._retry_at_new_address(
+                        "advertisement", await self._wait_for_advertisement()
+                    )
+                if not recovered:
+                    raise connect_err
+
+            # Create PTLS session and handshake
+            private_key = pem_to_private_key(data[CONF_PRIVATE_KEY_PEM].encode())
+            self._session = PTLSSession(
+                self._transport,
+                private_key,
+                data[CONF_CERTIFICATE],
+                data[CONF_DEVICE_PUBLIC_KEY],
+            )
+
+            _needs_signed_time = False
+            try:
+                await self._session.handshake()
+            except PTLSAlertError as err:
+                if err.code == ALERT_INVALID_CERTIFICATE:
+                    logger.warning("Certificate rejected, forcing refresh...")
+                    await self._transport.disconnect()
+                    await self._force_refresh_certificate()
+                    data = self.entry.data  # re-read after update
+                    self._transport = TedeeBLETransport(
+                        self._resolve_ble_device(data[CONF_ADDRESS]),
+                        disconnect_callback=self._on_disconnect,
+                    )
+                    await self._transport.connect()
+                    private_key = pem_to_private_key(data[CONF_PRIVATE_KEY_PEM].encode())
+                    self._session = PTLSSession(
+                        self._transport,
+                        private_key,
+                        data[CONF_CERTIFICATE],
+                        data[CONF_DEVICE_PUBLIC_KEY],
+                    )
+                    await self._session.handshake()
+                elif err.code == ALERT_NO_TRUSTED_TIME:
+                    logger.warning("Lock has no trusted time, fetching and retrying...")
+                    await self._transport.disconnect()
+                    await self._refresh_signed_time()
+                    data = self.entry.data
+                    self._transport = TedeeBLETransport(
+                        self._resolve_ble_device(data[CONF_ADDRESS]),
+                        disconnect_callback=self._on_disconnect,
+                    )
+                    await self._transport.connect()
+                    private_key = pem_to_private_key(data[CONF_PRIVATE_KEY_PEM].encode())
+                    self._session = PTLSSession(
+                        self._transport,
+                        private_key,
+                        data[CONF_CERTIFICATE],
+                        data[CONF_DEVICE_PUBLIC_KEY],
+                    )
+                    await self._session.handshake()
+                    _needs_signed_time = True
+                else:
+                    raise
+
+            # Create lock command interface
+            self._lock = TedeeLock(
+                self._transport,
+                self._session,
+                initial_door_state=self.state.door_state,
+            )
+
+            # Only set signed time when the lock requested it
+            if _needs_signed_time:
+                await self._lock.set_signed_time(data[CONF_SIGNED_TIME])
+
+            # Drain stale notifications
+            await self._lock.drain_pending_notifications()
+
+            # Fetch initial state
+            was_available = self.state.available
+            prev_lock_state = self.state.lock_state
+            prev_door_state = self.state.door_state
+
+            try:
+                lock_state, status, door_state = await self._lock.get_state()
+                self._apply_observed_state(lock_state, status, door_state)
+            except Exception:
+                logger.warning("Failed to get initial lock state", exc_info=True)
+
+            try:
+                level, charging = await self._lock.get_battery()
+                self.state.battery_level = level
+                self.state.battery_charging = charging
+            except Exception:
+                logger.warning("Failed to get initial battery", exc_info=True)
+
+            # Active door-state read — get_state only reports door state via the
+            # cached value from the 0xBA notification, which is empty on cold
+            # start. GET_DOOR_STATE (0x37) returns the live sensor value.
+            try:
+                door_state = await self._lock.get_door_state()
+                self._observe_door_state(door_state)
+                if door_state == DOOR_STATE_UNKNOWN:
+                    # The lock answered, and answered "no door data".
+                    self._note_door_sensor_absent()
+            except CommandError:
+                # The lock rejected the command outright — also a clear "no
+                # sensor here", and how some firmware answers instead of UNKNOWN.
+                logger.debug("Lock rejected GET_DOOR_STATE (no door sensor?)", exc_info=True)
+                self._note_door_sensor_absent()
+            except Exception:
+                logger.debug("Door state read failed, leaving sensor flag as-is", exc_info=True)
+
+            # Mark available and notify entities
+            self.state.available = True
+            self._reconnect_attempt = 0
+            self._disconnect_time = None
+
+            # Only push update if something actually changed, to avoid
+            # resetting HA's "last_changed" timestamp on routine reconnects
+            state_changed = (
+                not was_available
+                or self.state.lock_state != prev_lock_state
+                or self.state.door_state != prev_door_state
+            )
+            if state_changed:
+                self.async_set_updated_data(self.state)
+
+            # Start notification listener
+            self._notification_task = self.hass.async_create_background_task(
+                self._notification_loop(),
+                f"tedee_ble_{self.device_id}_notifications",
+            )
+
+            logger.info("Connected to %s successfully", self.lock_name)
+
+    async def _disconnect(self) -> None:
+        """Disconnect from the lock."""
+        if self._notification_task and not self._notification_task.done():
+            self._notification_task.cancel()
+            try:
+                await self._notification_task
+            except asyncio.CancelledError:
+                pass
+            self._notification_task = None
+
+        if self._transport:
+            try:
+                await self._transport.disconnect()
+            except Exception:
+                pass
+            self._transport = None
+
+        self._session = None
+        self._lock = None
+
+    @callback
+    def _on_disconnect(self) -> None:
+        """Handle BLE disconnection.
+
+        Don't mark unavailable immediately, the lock drops idle connections 
+        after ~25-45s. Reconnects typically succeed in ~2-5s, so we give 
+        a grace period before showing entities as unavailable.
+        """
+        logger.warning("BLE disconnected from %s", self.lock_name)
+
+        if not self._shutting_down:
+            self._schedule_reconnect()
+
+    @callback
+    def _schedule_reconnect(self) -> None:
+        """Schedule a reconnection attempt with backoff."""
+        if self._reconnect_task and not self._reconnect_task.done():
+            return  # Already scheduled
+
+        # Start the unavailability grace clock here rather than in
+        # _on_disconnect, because that callback is not the only way we notice a
+        # dead connection: an abnormal notification-loop exit (decrypt wedge,
+        # keep-alive failure) reconnects while BLE still looks connected, so no
+        # disconnect callback ever fires. With no timestamp on that path the
+        # grace check in _reconnect() can never pass, and entities stay
+        # "available" showing a stale lock state for as long as it keeps
+        # failing. Stamp only the first attempt — re-stamping on every retry
+        # would push the deadline out forever and defeat the check just as
+        # thoroughly.
+        if self._disconnect_time is None:
+            self._disconnect_time = time.monotonic()
+
+        delay_idx = min(self._reconnect_attempt, len(RECONNECT_DELAYS) - 1)
+        delay = RECONNECT_DELAYS[delay_idx]
+        self._reconnect_attempt += 1
+
+        logger.info(
+            "Scheduling reconnect to %s in %ds (attempt %d)",
+            self.lock_name, delay, self._reconnect_attempt,
+        )
+        self._reconnect_task = self.hass.async_create_background_task(
+            self._reconnect(delay),
+            f"tedee_ble_{self.device_id}_reconnect",
+        )
+
+    async def _reconnect(self, delay: float) -> None:
+        """Wait and then attempt reconnection."""
+        await asyncio.sleep(delay)
+        try:
+            await self._disconnect()
+            await self._connect()
+        except Exception as err:
+            logger.warning("Reconnect to %s failed: %s", self.lock_name, err)
+            # Mark unavailable only after grace period expires
+            if (
+                self.state.available
+                and self._disconnect_time
+                and time.monotonic() - self._disconnect_time > UNAVAILABLE_GRACE_SECONDS
+            ):
+                logger.info("Grace period expired, marking %s unavailable", self.lock_name)
+                self.state.available = False
+                self.async_set_updated_data(self.state)
+            if not self._shutting_down:
+                if self._in_firmware_reboot_window():
+                    # The lock is rebooting after a firmware update — its MAC
+                    # changes and connects fail with the same "no connection
+                    # slot / not reachable" error as proxy exhaustion. That's
+                    # transient, so keep retrying fast to latch onto the new MAC
+                    # as soon as it advertises, rather than backing off for 5min.
+                    logger.info(
+                        "Reconnect to %s failed during firmware update — retrying fast",
+                        self.lock_name,
+                    )
+                    self._reconnect_attempt = 0
+                # If the proxy is out of connection slots, retrying every 60s
+                # only keeps it busy and prevents recovery. Jump ahead in the
+                # backoff ladder so the proxy gets room to breathe.
+                elif "no backend with an available connection slot" in str(err).lower():
+                    self._reconnect_attempt = max(
+                        self._reconnect_attempt, PROXY_EXHAUSTED_DELAY_INDEX
+                    )
+                # Drop the self-reference so _schedule_reconnect's "already scheduled"
+                # guard doesn't see this still-running task and bail out.
+                self._reconnect_task = None
+                self._schedule_reconnect()
+
+    async def _notification_loop(self) -> None:
+        """Background loop: listen for notifications + periodic keep-alive.
+
+        The Tedee lock disconnects BLE after ~60-90s of inactivity.
+        We send a get_state command every KEEPALIVE_INTERVAL_SECONDS to keep
+        the connection alive and refresh state as a side-effect.
+        """
+        logger.debug("Notification loop started for %s", self.lock_name)
+        self._last_ble_activity = time.monotonic()
+        try:
+            while self.is_connected:
+                # Wait for notification, but only until next keep-alive is due
+                elapsed = time.monotonic() - self._last_ble_activity
+                wait_time = max(1.0, KEEPALIVE_INTERVAL_SECONDS - elapsed)
+
+                try:
+                    data = await self._transport.read_notification(timeout=wait_time)
+                except asyncio.TimeoutError:
+                    # No notification — send keep-alive get_state
+                    if self._lock and self.is_connected:
+                        try:
+                            async with self._command_lock:
+                                lock_state, status, door_state = (
+                                    await self._lock.get_state()
+                                )
+                            self._last_ble_activity = time.monotonic()
+                            self._apply_observed_state(lock_state, status, door_state)
+                            self.async_set_updated_data(self.state)
+                        except Exception as err:
+                            logger.warning("Keep-alive failed: %s", err)
+                            break
+                    continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception as err:
+                    logger.warning("Notification read error: %s", err)
+                    break
+
+                # Notification received — connection is active
+                self._last_ble_activity = time.monotonic()
+
+                if self._lock is None:
+                    continue
+
+                notification = await self._lock.parse_notification(data)
+                if notification is None:
+                    continue
+
+                logger.debug("Notification from %s: %s", self.lock_name, notification)
+
+                if notification["type"] == "lock_state":
+                    prev_lock_state = self.state.lock_state
+                    self.state.lock_state = notification["state"]
+                    self.state.lock_status = notification["status"]
+                    self._track_firmware_state(notification["state"])
+                    self._observe_door_state(notification["door_state"])
+                    # Only fire lock action event if lock state actually changed
+                    # (door_sensor triggers send unchanged lock state — skip those)
+                    if notification["state"] != prev_lock_state:
+                        self.state.last_trigger = notification.get("trigger_name", "unknown")
+                        # Resolve access_id to username
+                        access_id = notification.get("access_id", 0)
+                        if access_id:
+                            user_map = self.entry.data.get(CONF_USER_MAP, {})
+                            username = user_map.get(str(access_id))
+                            if username is None:
+                                username = await self._resolve_unknown_user(access_id)
+                            self.state.last_user = username
+                        else:
+                            self.state.last_user = "N/A"
+                        self.state.last_event_type = notification["state_name"].lower()
+                        self.state.last_event_id += 1
+                        # Fire event bus event for logbook
+                        self.hass.bus.async_fire(EVENT_LOCK_ACTION, {
+                            "entity_id": self.lock_entity_id,
+                            "lock_name": self.lock_name,
+                            "action": self.state.last_event_type,
+                            "trigger": self.state.last_trigger,
+                            "user": self.state.last_user,
+                        })
+                    self.async_set_updated_data(self.state)
+
+
+                elif notification["type"] == "battery":
+                    self.state.battery_level = notification["level"]
+                    self.state.battery_charging = notification["charging"]
+                    self.async_set_updated_data(self.state)
+
+                elif notification["type"] == "accessory_battery":
+                    # Deliberately not treated as door-sensor evidence: 0xD5
+                    # carries an accessory id but no type, so a keypad's
+                    # battery is indistinguishable from a door sensor's.
+                    self.state.accessory_battery_level = notification["level"]
+                    self.state.accessory_battery_id = notification["accessory_id"]
+                    self.state.accessory_battery_timestamp = notification["timestamp"]
+                    self.async_set_updated_data(self.state)
+
+                elif notification["type"] == "need_datetime":
+                    logger.info("Lock %s requests time sync", self.lock_name)
+                    try:
+                        await self._refresh_signed_time()
+                        async with self._command_lock:
+                            await self._lock.set_signed_time(
+                                self.entry.data[CONF_SIGNED_TIME]
+                            )
+                        self._last_ble_activity = time.monotonic()
+                    except Exception:
+                        logger.warning("Failed to sync time", exc_info=True)
+
+        except asyncio.CancelledError:
+            # Intentional teardown (_disconnect/shutdown cancels us) — propagate
+            # without scheduling a reconnect.
+            raise
+        except Exception as err:
+            logger.warning(
+                "Notification loop for %s crashed: %s — forcing reconnect",
+                self.lock_name, err, exc_info=True,
+            )
+        logger.debug("Notification loop ended for %s", self.lock_name)
+        # Any abnormal exit (decrypt wedge, keep-alive/read break) can leave the
+        # session unusable while BLE still looks connected, so _on_disconnect
+        # never fires and the poll path skips reconnect. Force one here.
+        # _schedule_reconnect dedupes if a reconnect is already pending.
+        if not self._shutting_down:
+            self._schedule_reconnect()
+
+    async def _async_update_data(self) -> TedeeState:
+        """Polling fallback — also checks certificate freshness."""
+        # Check certificate periodically
+        now = time.monotonic()
+        if now - self._last_cert_check > CERT_CHECK_INTERVAL_SECONDS:
+            self._last_cert_check = now
+            try:
+                await self._refresh_certificate_if_needed()
+            except CloudAPIError as err:
+                # Key revoked or missing scopes — prompt the user to re-auth
+                # instead of silently letting the certificate (and lock) expire.
+                if err.status_code in (401, 403):
+                    raise ConfigEntryAuthFailed(
+                        f"Tedee Cloud rejected the API key: {err}"
+                    ) from err
+                logger.warning("Certificate check failed: %s", err)
+            except Exception:
+                logger.warning("Certificate check failed", exc_info=True)
+
+        # If not connected, try reconnecting (but skip if reconnect already in progress)
+        if not self.is_connected:
+            if self._reconnect_task and not self._reconnect_task.done():
+                logger.debug("Reconnect already in progress, skipping poll reconnect")
+                return self.state
+            try:
+                await self._disconnect()
+                await self._connect()
+            except Exception as err:
+                logger.warning("Poll reconnect failed: %s", err)
+                self.state.available = False
+                return self.state
+
+        # Fetch fresh state
+        if self._lock and self.is_connected:
+            try:
+                async with self._command_lock:
+                    lock_state, status, door_state = await self._lock.get_state()
+                self._apply_observed_state(lock_state, status, door_state)
+            except Exception:
+                logger.warning("Failed to poll lock state", exc_info=True)
+
+            try:
+                async with self._command_lock:
+                    level, charging = await self._lock.get_battery()
+                self.state.battery_level = level
+                self.state.battery_charging = charging
+            except Exception:
+                logger.warning("Failed to poll battery", exc_info=True)
+
+        return self.state
+
+    # ─── Command methods (called by entities) ────────────────────
+
+    async def async_lock(self) -> None:
+        """Lock the door."""
+        await self._send_command("lock")
+
+    async def async_unlock(self, auto_pull: bool = False) -> None:
+        """Unlock the door. If auto_pull, also sends pull_spring after unlocking.
+
+        When auto_pull is False we send UNLOCK_NO_PULL so the lock skips its own
+        configured auto-pull (the lock-side setting from the Tedee app would
+        otherwise still trigger a spring pull on a plain unlock).
+
+        When auto_pull is True we send UNLOCK_NONE, which lets the lock's own
+        firmware auto-pull setting run if enabled. We then watch the state:
+        if the firmware starts pulling on its own (PULL_SPRING / PULLING) we
+        skip our redundant pull_spring command (which would return BUSY).
+        Only if the lock settles at UNLOCKED without firmware auto-pull do we
+        send pull_spring ourselves.
+        """
+        unlock_mode = UNLOCK_NONE if auto_pull else UNLOCK_NO_PULL
+        await self._send_command("unlock", mode=unlock_mode)
+        if not auto_pull:
+            return
+
+        unlocked_since: float | None = None
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+            if not self.is_connected:
+                break
+            state = self.state.lock_state
+            if state in (LOCK_STATE_PULL_SPRING, LOCK_STATE_PULLING):
+                return
+            if state == LOCK_STATE_UNLOCKED:
+                if unlocked_since is None:
+                    unlocked_since = time.monotonic()
+                elif time.monotonic() - unlocked_since >= 1.0:
+                    await self._send_command("pull_spring")
+                    return
+            else:
+                unlocked_since = None
+        logger.warning("Auto-pull: lock did not reach a pull/unlocked state within 15s")
+
+    async def async_open(self) -> None:
+        """Pull the spring (open)."""
+        await self._send_command("pull_spring")
+
+
+    async def _send_command(self, command: str, **kwargs) -> None:
+        """Send a command to the lock with error handling."""
+        if not self.is_connected or self._lock is None:
+            raise HomeAssistantError(f"Not connected to {self.lock_name}")
+
+        async with self._command_lock:
+            try:
+                method = getattr(self._lock, command)
+                await method(**kwargs)
+                self._last_ble_activity = time.monotonic()
+            except Exception as err:
+                logger.error("Command %s failed on %s: %s", command, self.lock_name, err)
+                raise HomeAssistantError(
+                    f"Command {command} failed: {err}"
+                ) from err
+
+    # ─── Certificate / signed time management ────────────────────
+
+    async def _refresh_certificate_if_needed(self) -> None:
+        """Check and refresh the certificate if it's expiring soon."""
+        data = self.entry.data
+        exp = data.get(CONF_CERT_EXPIRATION, "")
+        if not certificate_needs_refresh(exp):
+            return
+        await self._force_refresh_certificate()
+
+    async def _force_refresh_certificate(self) -> None:
+        """Force refresh the certificate and user map from cloud API."""
+        data = self.entry.data
+        logger.info("Refreshing certificate for %s...", self.lock_name)
+        async with TedeeCloudAPI(data[CONF_API_KEY]) as api:
+            cert_data = await api.get_device_certificate(
+                data[CONF_MOBILE_ID], data[CONF_DEVICE_ID]
+            )
+            user_map = await api.get_user_map(data[CONF_DEVICE_ID])
+            fw_info = await api.get_firmware_info(data[CONF_DEVICE_ID])
+        new_data = {**data}
+        new_data[CONF_CERTIFICATE] = cert_data["certificate"]
+        new_data[CONF_CERT_EXPIRATION] = cert_data["expirationDate"]
+        new_data[CONF_DEVICE_PUBLIC_KEY] = cert_data["devicePublicKey"]
+        new_data[CONF_USER_MAP] = {str(k): v for k, v in user_map.items()}
+        new_data[CONF_FIRMWARE_VERSION] = fw_info["version"]
+        new_data[CONF_UPDATE_AVAILABLE] = fw_info["updateAvailable"]
+        self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+        self._update_device_sw_version(fw_info["version"])
+        logger.info("Certificate refreshed, expires %s", cert_data["expirationDate"])
+
+    async def _refresh_firmware_info(self) -> None:
+        """Fetch firmware version and update status from cloud API."""
+        data = self.entry.data
+        async with TedeeCloudAPI(data[CONF_API_KEY]) as api:
+            fw_info = await api.get_firmware_info(data[CONF_DEVICE_ID])
+        new_data = {**data}
+        new_data[CONF_FIRMWARE_VERSION] = fw_info["version"]
+        new_data[CONF_UPDATE_AVAILABLE] = fw_info["updateAvailable"]
+        self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+        # Update device registry so sw_version shows immediately
+        self._update_device_sw_version(fw_info["version"])
+        logger.info("Firmware: %s (update: %s)", fw_info["version"], fw_info["updateAvailable"])
+
+    async def _refresh_firmware_after_update(self, previous_version: str) -> None:
+        """Re-read the firmware version from the cloud once an update finishes."""
+        for delay in FIRMWARE_REFRESH_DELAYS:
+            await asyncio.sleep(delay)
+            if self._shutting_down:
+                return
+            try:
+                await self._refresh_firmware_info()
+            except Exception:
+                logger.debug("Firmware info refresh failed", exc_info=True)
+                continue
+            if self.entry.data.get(CONF_FIRMWARE_VERSION) != previous_version:
+                return
+        logger.warning(
+            "%s still reports firmware %s after an update — cloud may not have "
+            "seen it check in yet",
+            self.lock_name,
+            previous_version,
+        )
+
+    def _update_device_sw_version(self, version: str) -> None:
+        """Update sw_version in the device registry."""
+        dev_reg = dr.async_get(self.hass)
+        device = dev_reg.async_get_device(
+            identifiers={(DOMAIN, str(self.device_id))}
+        )
+        if device:
+            dev_reg.async_update_device(device.id, sw_version=version)
+
+    async def _resolve_unknown_user(self, access_id: int) -> str:
+        """Refresh user map from cloud when an unknown access_id is seen."""
+        data = self.entry.data
+        try:
+            async with TedeeCloudAPI(data[CONF_API_KEY]) as api:
+                user_map = await api.get_user_map(data[CONF_DEVICE_ID])
+            new_map = {str(k): v for k, v in user_map.items()}
+            new_data = {**data}
+            new_data[CONF_USER_MAP] = new_map
+            self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+            logger.debug("User map refreshed, now has %d users", len(new_map))
+            return new_map.get(str(access_id), str(access_id))
+        except Exception:
+            logger.debug("Failed to refresh user map for access_id %d", access_id)
+            return str(access_id)
+
+    async def _refresh_signed_time(self) -> None:
+        """Refresh signed time from cloud API."""
+        data = self.entry.data
+        async with TedeeCloudAPI(data[CONF_API_KEY]) as api:
+            signed_time = await api.get_signed_time()
+        new_data = {**data}
+        new_data[CONF_SIGNED_TIME] = signed_time
+        self.hass.config_entries.async_update_entry(self.entry, data=new_data)

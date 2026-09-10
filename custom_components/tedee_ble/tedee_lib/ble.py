@@ -1,0 +1,204 @@
+"""BLE transport layer for Tedee lock communication using bleak."""
+
+import asyncio
+import logging
+from typing import Callable
+
+from bleak import BleakClient, BleakScanner
+from bleak.backends.device import BLEDevice
+
+try:
+    from bleak_retry_connector import establish_connection
+    HAS_RETRY_CONNECTOR = True
+except ImportError:
+    HAS_RETRY_CONNECTOR = False
+
+logger = logging.getLogger(__name__)
+
+# Tedee Lock BLE Service
+SERVICE_UUID = "00000002-4899-489f-a301-fbee544b1db0"
+
+# Characteristics
+CHAR_NOTIFICATIONS = "00000101-4899-489f-a301-fbee544b1db0"  # Lock -> Client (Notify)
+CHAR_PTLS_TX = "00000301-4899-489f-a301-fbee544b1db0"       # Lock -> Client (Notify)
+CHAR_PTLS_RX = "00000401-4899-489f-a301-fbee544b1db0"       # Client -> Lock (Write)
+CHAR_API_COMMANDS = "00000501-4899-489f-a301-fbee544b1db0"   # Bidirectional (Indicate)
+
+
+def serial_to_service_uuid(serial: str) -> str:
+    """Convert serial number to BLE advertising service UUID."""
+    clean = serial.replace("-", "")
+    if len(clean) != 14:
+        raise ValueError(f"Serial must be 14 digits (without dash), got: {serial}")
+    return (
+        f"{clean[0:4]}0000-{clean[4:8]}-{clean[8:12]}-{clean[12:14]}00-000000000000"
+    )
+
+
+def service_uuid_to_serial(uuid: str) -> str | None:
+    """Reverse of serial_to_service_uuid.
+
+    Extract the 14-digit serial from a Tedee per-device advertising UUID
+    (e.g. ``12340000-5678-9012-3400-000000000000`` -> ``12345678901234``).
+    Returns None for any UUID that doesn't match the per-device shape, so it
+    safely ignores the fixed family UUID and standard GAP/GATT services.
+    """
+    parts = uuid.lower().split("-")
+    if len(parts) != 5:
+        return None
+    g1, g2, g3, g4, g5 = parts
+    if not (g1.endswith("0000") and g4.endswith("00") and g5 == "000000000000"):
+        return None
+    serial = g1[0:4] + g2 + g3 + g4[0:2]
+    if len(serial) != 14 or not serial.isdigit():
+        return None
+    return serial
+
+
+class TedeeBLETransport:
+    """BLE transport for communicating with a Tedee lock."""
+
+    def __init__(
+        self,
+        device: BLEDevice | str,
+        disconnect_callback: Callable[[], None] | None = None,
+    ):
+        """Initialize with a BLEDevice or address string."""
+        self._device = device
+        self._disconnect_callback = disconnect_callback
+        self._client: BleakClient | None = None
+        self._ptls_tx_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._notification_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._api_command_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._mtu: int = 200
+
+    @property
+    def is_connected(self) -> bool:
+        return self._client is not None and self._client.is_connected
+
+    @property
+    def mtu(self) -> int:
+        return self._mtu
+
+    def _on_disconnect(self, client: BleakClient) -> None:
+        """Handle BLE disconnection."""
+        logger.warning("BLE disconnected")
+        if self._disconnect_callback:
+            self._disconnect_callback()
+
+    async def connect(self) -> None:
+        """Connect to the lock and subscribe to notifications."""
+        logger.info("Connecting to %s...", self._device)
+
+        if HAS_RETRY_CONNECTOR and isinstance(self._device, BLEDevice):
+            self._client = await establish_connection(
+                BleakClient,
+                self._device,
+                self._device.name or self._device.address,
+                disconnected_callback=self._on_disconnect,
+            )
+            logger.debug("Connected via bleak-retry-connector")
+        else:
+            self._client = BleakClient(
+                self._device,
+                disconnected_callback=self._on_disconnect,
+            )
+            await self._client.connect()
+            logger.debug("Connected via direct BleakClient")
+
+        # Acquire MTU from BlueZ before accessing mtu_size.
+        # HA wraps BleakClient in HaBleakClientWrapper, so reach through to _backend.
+        backend = getattr(self._client, '_backend', self._client)
+        if hasattr(backend, '_acquire_mtu'):
+            try:
+                await backend._acquire_mtu()
+            except Exception:
+                logger.debug("Failed to acquire MTU, using default", exc_info=True)
+
+        self._mtu = self._client.mtu_size
+        logger.info("Connected (MTU: %d)", self._mtu)
+
+        # Subscribe to PTLS TX notifications
+        await self._client.start_notify(CHAR_PTLS_TX, self._on_ptls_tx)
+        # Subscribe to Notifications characteristic
+        await self._client.start_notify(CHAR_NOTIFICATIONS, self._on_notification)
+        # Subscribe to API Commands indications
+        await self._client.start_notify(CHAR_API_COMMANDS, self._on_api_command)
+        logger.info("Subscribed to all characteristics")
+
+    async def disconnect(self) -> None:
+        """Disconnect from the lock."""
+        if self._client and self._client.is_connected:
+            await self._client.disconnect()
+            logger.info("Disconnected")
+
+    def _on_ptls_tx(self, _sender: int, data: bytearray) -> None:
+        """Handle PTLS TX notification (lock -> client, handshake)."""
+        logger.debug("PTLS TX: %s", data.hex())
+        self._ptls_tx_queue.put_nowait(bytes(data))
+
+    def _on_notification(self, _sender: int, data: bytearray) -> None:
+        """Handle Notification characteristic data."""
+        logger.debug("Notification received: len=%d, data=%s", len(data), data.hex())
+        self._notification_queue.put_nowait(bytes(data))
+
+    def _on_api_command(self, _sender: int, data: bytearray) -> None:
+        """Handle API Commands indication (lock -> client)."""
+        logger.debug("API Command response received: len=%d, data=%s", len(data), data.hex())
+        self._api_command_queue.put_nowait(bytes(data))
+
+    async def write_ptls_rx(self, data: bytes) -> None:
+        """Write data to PTLS RX characteristic (client -> lock, handshake)."""
+        logger.debug("PTLS RX write (%d bytes): %s", len(data), data.hex())
+        await self._client.write_gatt_char(CHAR_PTLS_RX, data, response=False)
+
+    async def write_api_command(self, data: bytes) -> None:
+        """Write data to API Commands characteristic."""
+        logger.debug("API Command write: %s", data.hex())
+        await self._client.write_gatt_char(CHAR_API_COMMANDS, data, response=True)
+
+    async def read_ptls_tx(self, timeout: float = 10.0) -> bytes:
+        """Read next message from PTLS TX queue."""
+        return await asyncio.wait_for(self._ptls_tx_queue.get(), timeout=timeout)
+
+    async def read_notification(self, timeout: float = 10.0) -> bytes:
+        """Read next notification."""
+        return await asyncio.wait_for(self._notification_queue.get(), timeout=timeout)
+
+    async def read_api_command(self, timeout: float = 10.0) -> bytes:
+        """Read next API command response."""
+        return await asyncio.wait_for(self._api_command_queue.get(), timeout=timeout)
+
+    async def read_ptls_tx_multi(self, count: int, timeout: float = 10.0) -> list[bytes]:
+        """Read multiple PTLS TX messages (for multi-part responses)."""
+        messages = []
+        for _ in range(count):
+            msg = await self.read_ptls_tx(timeout=timeout)
+            messages.append(msg)
+        return messages
+
+    def drain_api_command_queue(self) -> int:
+        """Discard any pending API-command response frames, return how many.
+
+        The lock's API responses are sometimes delivered twice by BlueZ/proxies.
+        A leftover duplicate from a prior command would otherwise be read as the
+        next command's response (e.g. get_state() reading the battery reply), so
+        callers drain stale frames before issuing a new command.
+        """
+        dropped = 0
+        while not self._api_command_queue.empty():
+            try:
+                self._api_command_queue.get_nowait()
+                dropped += 1
+            except asyncio.QueueEmpty:
+                break
+        return dropped
+
+    def drain_queues(self) -> None:
+        """Clear all queues."""
+        for q in (self._ptls_tx_queue, self._notification_queue, self._api_command_queue):
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break

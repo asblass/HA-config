@@ -1,0 +1,2616 @@
+"""Config flow for Homematic(IP) Local for OpenCCU."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from copy import deepcopy
+import logging
+from pprint import pformat
+import time
+from typing import Any, Final, cast
+from urllib.parse import urlparse
+
+import voluptuous as vol
+from voluptuous.schema_builder import UNDEFINED, Schema
+
+from aiohomematic.backend_detection import BackendDetectionResult, DetectionConfig, detect_backend
+from aiohomematic.const import (
+    DEFAULT_ENABLE_PROGRAM_SCAN,
+    DEFAULT_ENABLE_SYSVAR_SCAN,
+    DEFAULT_JSON_RPC_PORT,
+    DEFAULT_JSON_RPC_TLS_PORT,
+    DEFAULT_OPTIONAL_SETTINGS,
+    DEFAULT_PROGRAM_MARKERS,
+    DEFAULT_SYSVAR_MARKERS,
+    DEFAULT_TLS,
+    DEFAULT_UN_IGNORES,
+    DEFAULT_USE_GROUP_CHANNEL_FOR_COVER_STATE,
+    DescriptionMarker,
+    Interface,
+    OptionalSettings,
+    SystemInformation,
+    get_interface_default_port,
+    get_json_rpc_default_port,
+    is_interface_default_port,
+)
+from aiohomematic.exceptions import AuthFailure, BaseHomematicException, NoConnectionException, ValidationException
+from homeassistant.config_entries import (
+    CONN_CLASS_LOCAL_PUSH,
+    SOURCE_ZEROCONF,
+    ConfigEntry,
+    ConfigEntryState,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
+from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PASSWORD, CONF_PATH, CONF_PORT, CONF_USERNAME
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.selector import (
+    BooleanSelector,
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
+from homeassistant.helpers.service_info import ssdp
+from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
+from homeassistant.helpers.typing import ConfigType
+
+from .const import (
+    BACKEND_CCU,
+    BACKEND_LOOM,
+    CONF_ADVANCED_CONFIG,
+    CONF_BACKEND,
+    CONF_BACKUP_PATH,
+    CONF_CALLBACK_HOST,
+    CONF_CALLBACK_PORT_XML_RPC,
+    CONF_COMMAND_RETRY_MAX_ATTEMPTS,
+    CONF_COMMAND_THROTTLE_INTERVAL,
+    CONF_CUSTOM_PORT_CONFIG,
+    CONF_CUSTOM_PORTS,
+    CONF_DISABLE_CONFIG_PANEL,
+    CONF_ENABLE_LIGHT_LAST_BRIGHTNESS,
+    CONF_ENABLE_MQTT,
+    CONF_ENABLE_PROGRAM_SCAN,
+    CONF_ENABLE_SUB_DEVICES,
+    CONF_ENABLE_SYSTEM_NOTIFICATIONS,
+    CONF_ENABLE_SYSVAR_SCAN,
+    CONF_INSTANCE_NAME,
+    CONF_INTERFACE,
+    CONF_JSON_PORT,
+    CONF_LISTEN_ON_ALL_IP,
+    CONF_LOOM_PORT,
+    CONF_LOOM_TOKEN,
+    CONF_MQTT_PREFIX,
+    CONF_NON_ADMIN_PERMISSIONS,
+    CONF_OPTIONAL_SETTINGS,
+    CONF_PROGRAM_MARKERS,
+    CONF_SKIP_BACKEND_DETECTION,
+    CONF_SYS_SCAN_INTERVAL,
+    CONF_SYSVAR_MARKERS,
+    CONF_TLS,
+    CONF_UN_IGNORES,
+    CONF_USE_GROUP_CHANNEL_FOR_COVER_STATE,
+    CONF_VERIFY_TLS,
+    DEFAULT_BACKUP_PATH,
+    DEFAULT_COMMAND_RETRY_MAX_ATTEMPTS,
+    DEFAULT_COMMAND_THROTTLE_INTERVAL,
+    DEFAULT_DISABLE_CONFIG_PANEL,
+    DEFAULT_ENABLE_LIGHT_LAST_BRIGHTNESS,
+    DEFAULT_ENABLE_MQTT,
+    DEFAULT_ENABLE_SUB_DEVICES,
+    DEFAULT_ENABLE_SYSTEM_NOTIFICATIONS,
+    DEFAULT_LISTEN_ON_ALL_IP,
+    DEFAULT_LOOM_ENABLE_SUB_DEVICES,
+    DEFAULT_MQTT_PREFIX,
+    DEFAULT_SYS_SCAN_INTERVAL,
+    DOMAIN,
+)
+from .control_unit import ControlConfig, ControlUnit, validate_config_and_get_system_information
+from .support import InvalidConfig
+
+# Step indicator constants for config flow
+STEP_CENTRAL: Final = "1"
+STEP_INTERFACE: Final = "2"
+STEP_TLS_INTERFACES: Final = "2"
+STEP_ADVANCED: Final = "3"
+TOTAL_STEPS_BASIC: Final = "2"
+TOTAL_STEPS_ADVANCED: Final = "3"
+
+# Reconfigure flow steps
+STEP_RECONFIGURE: Final = "1"
+STEP_RECONFIGURE_TLS: Final = "2"
+TOTAL_STEPS_RECONFIGURE: Final = "2"
+
+# Reauth flow steps
+STEP_REAUTH: Final = "1"
+TOTAL_STEPS_REAUTH: Final = "1"
+
+_LOGGER = logging.getLogger(__name__)
+
+# Backend detection timeout (seconds)
+BACKEND_DETECTION_TIMEOUT: Final = 20.0
+
+# Interface enable/disable config keys
+CONF_BIDCOS_RF_PORT: Final = "bidcos_rf_port"
+CONF_BIDCOS_WIRED_PORT: Final = "bidcos_wired_port"
+CONF_ENABLE_BIDCOS_RF: Final = "bidcos_rf_enabled"
+CONF_ENABLE_BIDCOS_WIRED: Final = "bidcos_wired_enabled"
+CONF_ENABLE_CCU_JACK: Final = "ccu_jack_enabled"
+CONF_ENABLE_CUXD: Final = "cuxd_enabled"
+CONF_ENABLE_HMIP_RF: Final = "hmip_rf_enabled"
+CONF_ENABLE_VIRTUAL_DEVICES: Final = "virtual_devices_enabled"
+CONF_HMIP_RF_PORT: Final = "hmip_rf_port"
+CONF_VIRTUAL_DEVICES_PATH: Final = "virtual_devices_path"
+CONF_VIRTUAL_DEVICES_PORT: Final = "virtual_devices_port"
+CONF_RESET_PORT_DEFAULTS: Final = "reset_port_defaults"
+
+# VirtualDevices path constant
+IF_VIRTUAL_DEVICES_PATH: Final = "/groups"
+TEXT_SELECTOR = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
+PASSWORD_SELECTOR = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
+BOOLEAN_SELECTOR = BooleanSelector()
+
+# User-facing backend labels for the {backend} placeholder in flow_title.
+# The loom label carries the Beta marker so the discovery card shows it before
+# the user opens the flow. No parentheses — flow_title already brackets it.
+TITLE_BACKEND_CCU: Final = "aiohomematic"
+TITLE_BACKEND_LOOM: Final = "openccu-loom Beta"
+
+# openccu-loom mDNS discovery
+ZEROCONF_TYPE = "_openccu-loom._tcp.local."
+DEFAULT_LOOM_BASE_PATH = "/api/v1"
+CONF_LOOM_BASE_PATH = "loom_base_path"  # internal discovery-state key (not persisted)
+CONF_LOOM_CCU = "serial"  # CCU-selection form field
+CONF_LOOM_DAEMON = "daemon"  # daemon-selection form field (active browse)
+LOOM_MANUAL_DAEMON = "__manual__"  # sentinel select value for manual entry
+LOOM_BROWSE_SECONDS = 3.0  # active mDNS browse window in the user-initiated flow
+PORT_SELECTOR = vol.All(
+    NumberSelector(NumberSelectorConfig(mode=NumberSelectorMode.BOX, min=1, max=65535)),
+    vol.Coerce(int),
+)
+PORT_SELECTOR_OPTIONAL = vol.All(
+    NumberSelector(NumberSelectorConfig(mode=NumberSelectorMode.BOX, min=0, max=65535)),
+    vol.Coerce(int),
+)
+SCAN_INTERVAL_SELECTOR = vol.All(
+    NumberSelector(NumberSelectorConfig(mode=NumberSelectorMode.BOX, min=5, step="any", unit_of_measurement="sec")),
+    vol.Coerce(int),
+)
+COMMAND_RETRY_MAX_ATTEMPTS_SELECTOR = vol.All(
+    NumberSelector(NumberSelectorConfig(mode=NumberSelectorMode.BOX, min=0, max=10, step=1)),
+    vol.Coerce(int),
+)
+COMMAND_THROTTLE_INTERVAL_SELECTOR = vol.All(
+    NumberSelector(
+        NumberSelectorConfig(mode=NumberSelectorMode.BOX, min=0.0, max=5.0, step=0.1, unit_of_measurement="sec")
+    ),
+    vol.Coerce(float),
+)
+
+
+def get_domain_schema(data: ConfigType) -> Schema:
+    """Return the central/connection schema (callback settings are in advanced step)."""
+    return vol.Schema(
+        {
+            vol.Required(CONF_INSTANCE_NAME, default=data.get(CONF_INSTANCE_NAME) or UNDEFINED): TEXT_SELECTOR,
+            vol.Required(CONF_HOST, default=data.get(CONF_HOST)): TEXT_SELECTOR,
+            vol.Required(CONF_USERNAME, default=data.get(CONF_USERNAME)): TEXT_SELECTOR,
+            vol.Required(CONF_PASSWORD, default=data.get(CONF_PASSWORD)): PASSWORD_SELECTOR,
+            vol.Optional(
+                CONF_SKIP_BACKEND_DETECTION, default=data.get(CONF_SKIP_BACKEND_DETECTION, False)
+            ): BOOLEAN_SELECTOR,
+        }
+    )
+
+
+def get_loom_schema(data: ConfigType) -> Schema:
+    """Return the openccu-loom daemon connection schema.
+
+    The daemon owns interfaces, callback ports and CCU credentials, so
+    the user only supplies the daemon endpoint, a bearer token and the
+    sub-device toggle (enabled by default on the loom backend).
+    """
+    return vol.Schema(
+        {
+            vol.Required(CONF_INSTANCE_NAME, default=data.get(CONF_INSTANCE_NAME) or UNDEFINED): TEXT_SELECTOR,
+            vol.Required(CONF_HOST, default=data.get(CONF_HOST)): TEXT_SELECTOR,
+            vol.Optional(CONF_LOOM_PORT, default=data.get(CONF_LOOM_PORT, UNDEFINED)): PORT_SELECTOR_OPTIONAL,
+            vol.Required(CONF_TLS, default=data.get(CONF_TLS, True)): BOOLEAN_SELECTOR,
+            vol.Required(CONF_VERIFY_TLS, default=data.get(CONF_VERIFY_TLS, True)): BOOLEAN_SELECTOR,
+            vol.Optional(CONF_LOOM_TOKEN, default=data.get(CONF_LOOM_TOKEN, "")): PASSWORD_SELECTOR,
+            vol.Required(
+                CONF_ENABLE_SUB_DEVICES,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(
+                    CONF_ENABLE_SUB_DEVICES, DEFAULT_LOOM_ENABLE_SUB_DEVICES
+                ),
+            ): BOOLEAN_SELECTOR,
+        }
+    )
+
+
+def get_options_schema(data: ConfigType) -> Schema:
+    """Return the options schema (callback settings are in advanced_settings step)."""
+    return vol.Schema(
+        {
+            vol.Required(CONF_HOST, default=data.get(CONF_HOST)): TEXT_SELECTOR,
+            vol.Required(CONF_USERNAME, default=data.get(CONF_USERNAME)): TEXT_SELECTOR,
+            vol.Required(CONF_PASSWORD, default=data.get(CONF_PASSWORD)): PASSWORD_SELECTOR,
+        }
+    )
+
+
+def get_loom_options_schema(data: ConfigType) -> Schema:
+    """Return the openccu-loom daemon connection schema for the options flow.
+
+    Mirrors :func:`get_loom_schema` without the (fixed) instance name: the
+    daemon owns interfaces, callbacks and CCU credentials, so only the daemon
+    endpoint and bearer token are editable.
+    """
+    return vol.Schema(
+        {
+            vol.Required(CONF_HOST, default=data.get(CONF_HOST)): TEXT_SELECTOR,
+            vol.Optional(CONF_LOOM_PORT, default=data.get(CONF_LOOM_PORT, UNDEFINED)): PORT_SELECTOR_OPTIONAL,
+            vol.Required(CONF_TLS, default=data.get(CONF_TLS, True)): BOOLEAN_SELECTOR,
+            vol.Required(CONF_VERIFY_TLS, default=data.get(CONF_VERIFY_TLS, True)): BOOLEAN_SELECTOR,
+            vol.Optional(CONF_LOOM_TOKEN, default=data.get(CONF_LOOM_TOKEN, "")): PASSWORD_SELECTOR,
+        }
+    )
+
+
+def get_loom_token_schema(data: ConfigType) -> Schema:
+    """Return the schema for a discovered openccu-loom daemon.
+
+    Host / port / TLS come from the mDNS advertisement, so the user only
+    supplies the bearer token and the sub-device toggle (enabled by
+    default on the loom backend).
+    """
+    return vol.Schema(
+        {
+            vol.Optional(CONF_LOOM_TOKEN, default=data.get(CONF_LOOM_TOKEN, "")): PASSWORD_SELECTOR,
+            vol.Required(CONF_ENABLE_SUB_DEVICES, default=DEFAULT_LOOM_ENABLE_SUB_DEVICES): BOOLEAN_SELECTOR,
+        }
+    )
+
+
+class _NeverRaised(Exception):
+    """Placeholder type so an `except` clause can be written unconditionally."""
+
+
+def _loom_incompatible_version_error() -> type[Exception]:
+    """
+    Return the loom client's incompatible-version error, or an unraisable stand-in.
+
+    Imported lazily like every other `openccu_loom_client` reference in this
+    integration, and degraded to a type nothing raises when the package is
+    absent — the `except` clause then simply never matches, which is the
+    correct behaviour on a backend that has no daemon.
+
+    Deliberately duplicated from ``__init__.py`` rather than imported from it:
+    the config flow is loaded to render a form and must not pull in the entry
+    module to do so.
+    """
+    try:
+        from openccu_loom_client import LoomIncompatibleVersionError  # noqa: PLC0415
+    except ImportError:
+        return _NeverRaised
+    return LoomIncompatibleVersionError
+
+
+def _import_loom_list_ccus() -> Any:
+    """Import the loom CCU-listing helper (blocking pydantic submodule import)."""
+    from openccu_loom_client.compat.aiohomematic.central import list_ccus  # noqa: PLC0415
+
+    return list_ccus
+
+
+async def _async_loom_list_ccus(
+    hass: HomeAssistant,
+    *,
+    host: str,
+    port: int | None,
+    tls: bool,
+    token: str | None,
+    base_path: str | None,
+) -> list[dict[str, Any]]:
+    """Return a daemon's CCUs for the discovery flow's CCU-selection step.
+
+    Surfaces the loom client's connection failures as the aiohomematic
+    exceptions the config flow already maps (``AuthFailure`` → invalid_auth,
+    ``NoConnectionException`` → cannot_connect).
+    """
+    list_ccus = await hass.async_add_import_executor_job(_import_loom_list_ccus)
+    try:
+        result: list[dict[str, Any]] = await list_ccus(host=host, port=port, tls=tls, token=token, base_path=base_path)
+    except Exception as exc:  # normalise loom-client errors to aiohomematic ones
+        from openccu_loom_client import LoomAuthError  # noqa: PLC0415
+
+        if isinstance(exc, LoomAuthError):
+            raise AuthFailure(str(exc)) from exc
+        # Not a connection failure, and mapping it to one sends the user off to
+        # debug their network for a mismatch no network change can fix. It
+        # reaches the flow steps as itself and gets its own error key there.
+        if isinstance(exc, _loom_incompatible_version_error()):
+            raise
+        raise NoConnectionException(str(exc)) from exc
+    return result
+
+
+def _loom_daemon_key(daemon: dict[str, Any]) -> str:
+    """Return the select-option key identifying a discovered daemon."""
+    return f"{daemon[CONF_HOST]}:{daemon[CONF_LOOM_PORT]}"
+
+
+async def _async_browse_loom_daemons(hass: HomeAssistant) -> list[dict[str, Any]]:  # pragma: no cover - live mDNS
+    """Browse the LAN for openccu-loom daemons (short window).
+
+    Returns one discovery-state dict per daemon (host / port / tls /
+    base_path / instance) — the same shape :meth:`async_step_zeroconf`
+    builds — so the daemon-selection step can route straight into the
+    shared token / CCU-selection steps. Live mDNS, hence not unit-tested.
+    """
+    from zeroconf import ServiceStateChange  # noqa: PLC0415
+    from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo  # noqa: PLC0415
+
+    from homeassistant.components import zeroconf as ha_zeroconf  # noqa: PLC0415
+
+    aiozc = await ha_zeroconf.async_get_async_instance(hass)
+    names: set[str] = set()
+
+    # zeroconf fires state changes with keyword arguments only
+    # (zeroconf=, service_type=, name=, state_change=), so the parameter
+    # names are part of the contract — renaming them breaks the callback.
+    @callback
+    def _on_change(zeroconf: Any, service_type: str, name: str, state_change: Any) -> None:
+        if state_change is not ServiceStateChange.Removed:
+            names.add(name)
+
+    browser = AsyncServiceBrowser(aiozc.zeroconf, ZEROCONF_TYPE, handlers=[_on_change])
+    try:
+        await asyncio.sleep(LOOM_BROWSE_SECONDS)
+    finally:
+        await browser.async_cancel()
+
+    daemons: list[dict[str, Any]] = []
+    for name in names:
+        info = AsyncServiceInfo(ZEROCONF_TYPE, name)
+        if not await info.async_request(aiozc.zeroconf, 3000):
+            continue
+        host = next((str(ip) for ip in info.parsed_addresses()), None)
+        if not host or not info.port:
+            continue
+        props = {
+            key.decode(): (value.decode() if isinstance(value, bytes) else value)
+            for key, value in (info.properties or {}).items()
+            if isinstance(key, bytes)
+        }
+        daemons.append(
+            {
+                CONF_HOST: host,
+                CONF_LOOM_PORT: info.port,
+                CONF_TLS: str(props.get("tls", "0")).lower() not in ("0", "", "false"),
+                CONF_LOOM_BASE_PATH: props.get("path") or DEFAULT_LOOM_BASE_PATH,
+                CONF_INSTANCE_NAME: props.get("instance") or name.removesuffix(f".{ZEROCONF_TYPE}"),
+            }
+        )
+    return daemons
+
+
+def get_reconfigure_schema(data: ConfigType) -> Schema:
+    """Return the reconfigure schema with only connection settings (TLS on next step)."""
+    return vol.Schema(
+        {
+            vol.Required(CONF_HOST, default=data.get(CONF_HOST)): TEXT_SELECTOR,
+            vol.Required(CONF_USERNAME, default=data.get(CONF_USERNAME)): TEXT_SELECTOR,
+            vol.Required(CONF_PASSWORD, default=data.get(CONF_PASSWORD)): PASSWORD_SELECTOR,
+        }
+    )
+
+
+def get_reauth_schema(data: ConfigType) -> Schema:
+    """Return the reauth schema with only credentials (host is fixed from existing entry)."""
+    return vol.Schema(
+        {
+            vol.Required(CONF_USERNAME, default=data.get(CONF_USERNAME)): TEXT_SELECTOR,
+            vol.Required(CONF_PASSWORD, default=data.get(CONF_PASSWORD)): PASSWORD_SELECTOR,
+        }
+    )
+
+
+def _get_step_placeholders(step: str, total: str) -> dict[str, str]:
+    """Return description placeholders with step indicators."""
+    return {
+        "step_current": step,
+        "step_total": total,
+    }
+
+
+def _get_retry_hint(error_type: str) -> str:
+    """Return a retry hint based on the error type."""
+    hints = {
+        "invalid_auth": "verify_credentials",
+        "cannot_connect": "check_network",
+        "detection_failed": "check_ccu_settings",
+        "invalid_config": "check_config_values",
+    }
+    return hints.get(error_type, "check_settings")
+
+
+def _get_backend_title(*, backend: str | None) -> str:
+    """Return the user-facing backend label for the {backend} flow-title placeholder."""
+    return TITLE_BACKEND_LOOM if backend == BACKEND_LOOM else TITLE_BACKEND_CCU
+
+
+def _get_effective_port(interface: Interface, tls: bool, data: ConfigType) -> int:
+    """Get the effective port for an interface - custom or TLS-based default."""
+    custom_ports: dict[str, int] = data.get(CONF_CUSTOM_PORTS, {})
+    interfaces: dict[Interface, dict[str, Any]] = data.get(CONF_INTERFACE, {})
+
+    # Check for custom port in new format
+    if interface.value in custom_ports:
+        return int(custom_ports[interface.value])
+
+    # Check for custom port in legacy interface format
+    if interface in interfaces and CONF_PORT in interfaces[interface]:
+        port: int = interfaces[interface][CONF_PORT]
+        # Only return if it's a custom (non-default) port
+        if not is_interface_default_port(interface=interface, port=port):
+            return port
+
+    # Return TLS-based default
+    return int(get_interface_default_port(interface=interface, tls=tls) or 0)
+
+
+def _get_effective_json_port(tls: bool, data: ConfigType) -> int:
+    """Get the effective JSON-RPC port - custom or TLS-based default."""
+    custom_port: int | None = data.get(CONF_JSON_PORT)
+    if custom_port and custom_port not in (DEFAULT_JSON_RPC_PORT, DEFAULT_JSON_RPC_TLS_PORT):
+        return int(custom_port)
+    return int(get_json_rpc_default_port(tls=tls))
+
+
+def get_tls_interfaces_schema(data: ConfigType, show_custom_ports_option: bool = True) -> Schema:
+    """
+    Return the TLS & interfaces schema (without ports - for simplified flow).
+
+    Args:
+        data: Configuration data
+        show_custom_ports_option: Whether to show the custom port config checkbox
+
+    """
+    interfaces = data.get(CONF_INTERFACE, {})
+
+    schema_dict: dict[Any, Any] = {
+        # TLS settings
+        vol.Required(CONF_TLS, default=data.get(CONF_TLS, False)): BOOLEAN_SELECTOR,
+        vol.Required(CONF_VERIFY_TLS, default=data.get(CONF_VERIFY_TLS, False)): BOOLEAN_SELECTOR,
+        # Interface checkboxes only (no ports)
+        vol.Required(CONF_ENABLE_HMIP_RF, default=Interface.HMIP_RF in interfaces): BOOLEAN_SELECTOR,
+        vol.Required(CONF_ENABLE_BIDCOS_RF, default=Interface.BIDCOS_RF in interfaces): BOOLEAN_SELECTOR,
+        vol.Required(CONF_ENABLE_VIRTUAL_DEVICES, default=Interface.VIRTUAL_DEVICES in interfaces): BOOLEAN_SELECTOR,
+        vol.Required(CONF_ENABLE_BIDCOS_WIRED, default=Interface.BIDCOS_WIRED in interfaces): BOOLEAN_SELECTOR,
+        vol.Required(CONF_ENABLE_CCU_JACK, default=Interface.CCU_JACK in interfaces): BOOLEAN_SELECTOR,
+        vol.Required(CONF_ENABLE_CUXD, default=Interface.CUXD in interfaces): BOOLEAN_SELECTOR,
+    }
+
+    # Add custom ports checkbox (for config flow, not for options flow which always shows ports)
+    if show_custom_ports_option:
+        schema_dict[vol.Optional(CONF_CUSTOM_PORT_CONFIG, default=False)] = BOOLEAN_SELECTOR
+
+    return vol.Schema(schema_dict)
+
+
+def get_port_config_schema(data: ConfigType) -> Schema:
+    """
+    Return the port configuration schema (for custom port configuration).
+
+    Shows only JSON-RPC port and ports for enabled interfaces.
+    Callback settings have been moved to advanced configuration.
+    """
+    tls = data.get(CONF_TLS, False)
+    interfaces = data.get(CONF_INTERFACE, {})
+
+    schema_dict: dict[Any, Any] = {
+        # JSON-RPC port (always shown)
+        vol.Optional(CONF_JSON_PORT, default=_get_effective_json_port(tls, data)): PORT_SELECTOR_OPTIONAL,
+    }
+
+    # Add port fields only for enabled interfaces
+    if Interface.HMIP_RF in interfaces:
+        schema_dict[vol.Required(CONF_HMIP_RF_PORT, default=_get_effective_port(Interface.HMIP_RF, tls, data))] = (
+            PORT_SELECTOR
+        )
+    if Interface.BIDCOS_RF in interfaces:
+        schema_dict[vol.Required(CONF_BIDCOS_RF_PORT, default=_get_effective_port(Interface.BIDCOS_RF, tls, data))] = (
+            PORT_SELECTOR
+        )
+    if Interface.VIRTUAL_DEVICES in interfaces:
+        schema_dict[
+            vol.Required(CONF_VIRTUAL_DEVICES_PORT, default=_get_effective_port(Interface.VIRTUAL_DEVICES, tls, data))
+        ] = PORT_SELECTOR
+        schema_dict[
+            vol.Required(
+                CONF_VIRTUAL_DEVICES_PATH,
+                default=interfaces.get(Interface.VIRTUAL_DEVICES, {}).get(CONF_PATH, IF_VIRTUAL_DEVICES_PATH),
+            )
+        ] = TEXT_SELECTOR
+    if Interface.BIDCOS_WIRED in interfaces:
+        schema_dict[
+            vol.Required(CONF_BIDCOS_WIRED_PORT, default=_get_effective_port(Interface.BIDCOS_WIRED, tls, data))
+        ] = PORT_SELECTOR
+
+    return vol.Schema(schema_dict)
+
+
+def get_interface_schema(use_tls: bool, data: ConfigType) -> Schema:
+    """Return the full interface schema with TLS settings and interface ports (legacy/options flow)."""
+    interfaces = data.get(CONF_INTERFACE, {})
+
+    return vol.Schema(
+        {
+            # TLS settings at top
+            vol.Required(CONF_TLS, default=use_tls): BOOLEAN_SELECTOR,
+            vol.Required(CONF_VERIFY_TLS, default=data.get(CONF_VERIFY_TLS, False)): BOOLEAN_SELECTOR,
+            # JSON-RPC port
+            vol.Optional(CONF_JSON_PORT, default=data.get(CONF_JSON_PORT) or UNDEFINED): PORT_SELECTOR_OPTIONAL,
+            # Interface settings with ports
+            vol.Required(CONF_ENABLE_HMIP_RF, default=Interface.HMIP_RF in interfaces): BOOLEAN_SELECTOR,
+            vol.Required(
+                CONF_HMIP_RF_PORT, default=_get_effective_port(Interface.HMIP_RF, use_tls, data)
+            ): PORT_SELECTOR,
+            vol.Required(CONF_ENABLE_BIDCOS_RF, default=Interface.BIDCOS_RF in interfaces): BOOLEAN_SELECTOR,
+            vol.Required(
+                CONF_BIDCOS_RF_PORT, default=_get_effective_port(Interface.BIDCOS_RF, use_tls, data)
+            ): PORT_SELECTOR,
+            vol.Required(
+                CONF_ENABLE_VIRTUAL_DEVICES, default=Interface.VIRTUAL_DEVICES in interfaces
+            ): BOOLEAN_SELECTOR,
+            vol.Required(
+                CONF_VIRTUAL_DEVICES_PORT, default=_get_effective_port(Interface.VIRTUAL_DEVICES, use_tls, data)
+            ): PORT_SELECTOR,
+            vol.Required(CONF_VIRTUAL_DEVICES_PATH, default=IF_VIRTUAL_DEVICES_PATH): TEXT_SELECTOR,
+            vol.Required(CONF_ENABLE_BIDCOS_WIRED, default=Interface.BIDCOS_WIRED in interfaces): BOOLEAN_SELECTOR,
+            vol.Required(
+                CONF_BIDCOS_WIRED_PORT, default=_get_effective_port(Interface.BIDCOS_WIRED, use_tls, data)
+            ): PORT_SELECTOR,
+            vol.Required(CONF_ENABLE_CCU_JACK, default=Interface.CCU_JACK in interfaces): BOOLEAN_SELECTOR,
+            vol.Required(CONF_ENABLE_CUXD, default=Interface.CUXD in interfaces): BOOLEAN_SELECTOR,
+        }
+    )
+
+
+def get_advanced_schema(data: ConfigType, all_un_ignore_parameters: list[str]) -> Schema:
+    """Return the advanced schema with all fields including callback settings."""
+    existing_parameters: list[str] = [
+        p
+        for p in data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_UN_IGNORES, DEFAULT_UN_IGNORES)
+        if p in all_un_ignore_parameters
+    ]
+
+    advanced_schema = vol.Schema(
+        {
+            # Callback settings (moved here from port config)
+            vol.Optional(CONF_CALLBACK_HOST, default=data.get(CONF_CALLBACK_HOST) or UNDEFINED): TEXT_SELECTOR,
+            vol.Optional(
+                CONF_CALLBACK_PORT_XML_RPC, default=data.get(CONF_CALLBACK_PORT_XML_RPC) or UNDEFINED
+            ): PORT_SELECTOR_OPTIONAL,
+            vol.Required(
+                CONF_LISTEN_ON_ALL_IP,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_LISTEN_ON_ALL_IP, DEFAULT_LISTEN_ON_ALL_IP),
+            ): BOOLEAN_SELECTOR,
+            # Program/Sysvar scanning
+            vol.Required(
+                CONF_ENABLE_PROGRAM_SCAN,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_ENABLE_PROGRAM_SCAN, DEFAULT_ENABLE_PROGRAM_SCAN),
+            ): BOOLEAN_SELECTOR,
+            vol.Required(
+                CONF_PROGRAM_MARKERS,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_PROGRAM_MARKERS, DEFAULT_PROGRAM_MARKERS),
+            ): SelectSelector(
+                config=SelectSelectorConfig(
+                    mode=SelectSelectorMode.DROPDOWN,
+                    multiple=True,
+                    sort=True,
+                    options=[str(v) for v in DescriptionMarker if v != DescriptionMarker.HAHM],
+                )
+            ),
+            vol.Required(
+                CONF_ENABLE_SYSVAR_SCAN,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_ENABLE_SYSVAR_SCAN, DEFAULT_ENABLE_SYSVAR_SCAN),
+            ): BOOLEAN_SELECTOR,
+            vol.Required(
+                CONF_SYSVAR_MARKERS,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_SYSVAR_MARKERS, DEFAULT_SYSVAR_MARKERS),
+            ): SelectSelector(
+                config=SelectSelectorConfig(
+                    mode=SelectSelectorMode.DROPDOWN,
+                    multiple=True,
+                    sort=True,
+                    options=[str(v) for v in DescriptionMarker],
+                )
+            ),
+            vol.Required(
+                CONF_SYS_SCAN_INTERVAL,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_SYS_SCAN_INTERVAL, DEFAULT_SYS_SCAN_INTERVAL),
+            ): SCAN_INTERVAL_SELECTOR,
+            vol.Required(
+                CONF_COMMAND_RETRY_MAX_ATTEMPTS,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(
+                    CONF_COMMAND_RETRY_MAX_ATTEMPTS, DEFAULT_COMMAND_RETRY_MAX_ATTEMPTS
+                ),
+            ): COMMAND_RETRY_MAX_ATTEMPTS_SELECTOR,
+            vol.Required(
+                CONF_COMMAND_THROTTLE_INTERVAL,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(
+                    CONF_COMMAND_THROTTLE_INTERVAL, DEFAULT_COMMAND_THROTTLE_INTERVAL
+                ),
+            ): COMMAND_THROTTLE_INTERVAL_SELECTOR,
+            vol.Required(
+                CONF_ENABLE_SYSTEM_NOTIFICATIONS,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(
+                    CONF_ENABLE_SYSTEM_NOTIFICATIONS, DEFAULT_ENABLE_SYSTEM_NOTIFICATIONS
+                ),
+            ): BOOLEAN_SELECTOR,
+            # MQTT settings
+            vol.Required(
+                CONF_ENABLE_MQTT,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_ENABLE_MQTT, DEFAULT_ENABLE_MQTT),
+            ): BOOLEAN_SELECTOR,
+            vol.Optional(
+                CONF_MQTT_PREFIX,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_MQTT_PREFIX, DEFAULT_MQTT_PREFIX),
+            ): TEXT_SELECTOR,
+            vol.Optional(
+                CONF_UN_IGNORES,
+                default=existing_parameters,
+            ): SelectSelector(
+                config=SelectSelectorConfig(
+                    mode=SelectSelectorMode.DROPDOWN,
+                    multiple=True,
+                    sort=False,
+                    options=all_un_ignore_parameters,
+                )
+            ),
+            vol.Optional(
+                CONF_ENABLE_SUB_DEVICES,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_ENABLE_SUB_DEVICES, DEFAULT_ENABLE_SUB_DEVICES),
+            ): BOOLEAN_SELECTOR,
+            vol.Optional(
+                CONF_DISABLE_CONFIG_PANEL,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_DISABLE_CONFIG_PANEL, DEFAULT_DISABLE_CONFIG_PANEL),
+            ): BOOLEAN_SELECTOR,
+            vol.Optional(
+                CONF_ENABLE_LIGHT_LAST_BRIGHTNESS,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(
+                    CONF_ENABLE_LIGHT_LAST_BRIGHTNESS, DEFAULT_ENABLE_LIGHT_LAST_BRIGHTNESS
+                ),
+            ): BOOLEAN_SELECTOR,
+            vol.Optional(
+                CONF_USE_GROUP_CHANNEL_FOR_COVER_STATE,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(
+                    CONF_USE_GROUP_CHANNEL_FOR_COVER_STATE, DEFAULT_USE_GROUP_CHANNEL_FOR_COVER_STATE
+                ),
+            ): BOOLEAN_SELECTOR,
+            vol.Optional(
+                CONF_OPTIONAL_SETTINGS,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_OPTIONAL_SETTINGS, DEFAULT_OPTIONAL_SETTINGS),
+            ): SelectSelector(
+                config=SelectSelectorConfig(
+                    mode=SelectSelectorMode.DROPDOWN,
+                    multiple=True,
+                    sort=True,
+                    options=[str(v) for v in OptionalSettings],
+                )
+            ),
+        }
+    )
+    if not all_un_ignore_parameters:
+        del advanced_schema.schema[CONF_UN_IGNORES]
+    return advanced_schema
+
+
+def get_advanced_settings_schema(data: ConfigType, all_un_ignore_parameters: list[str]) -> Schema:
+    """Return the advanced settings schema without program/sysvar fields (for options flow menu)."""
+    existing_parameters: list[str] = [
+        p
+        for p in data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_UN_IGNORES, DEFAULT_UN_IGNORES)
+        if p in all_un_ignore_parameters
+    ]
+
+    advanced_settings_schema = vol.Schema(
+        {
+            # Callback settings (moved here from connection step)
+            vol.Optional(CONF_CALLBACK_HOST, default=data.get(CONF_CALLBACK_HOST) or UNDEFINED): TEXT_SELECTOR,
+            vol.Optional(
+                CONF_CALLBACK_PORT_XML_RPC, default=data.get(CONF_CALLBACK_PORT_XML_RPC) or UNDEFINED
+            ): PORT_SELECTOR_OPTIONAL,
+            vol.Required(
+                CONF_ENABLE_SYSTEM_NOTIFICATIONS,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(
+                    CONF_ENABLE_SYSTEM_NOTIFICATIONS, DEFAULT_ENABLE_SYSTEM_NOTIFICATIONS
+                ),
+            ): BOOLEAN_SELECTOR,
+            vol.Required(
+                CONF_LISTEN_ON_ALL_IP,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_LISTEN_ON_ALL_IP, DEFAULT_LISTEN_ON_ALL_IP),
+            ): BOOLEAN_SELECTOR,
+            vol.Required(
+                CONF_ENABLE_MQTT,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_ENABLE_MQTT, DEFAULT_ENABLE_MQTT),
+            ): BOOLEAN_SELECTOR,
+            vol.Optional(
+                CONF_MQTT_PREFIX,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_MQTT_PREFIX, DEFAULT_MQTT_PREFIX),
+            ): TEXT_SELECTOR,
+            vol.Required(
+                CONF_COMMAND_RETRY_MAX_ATTEMPTS,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(
+                    CONF_COMMAND_RETRY_MAX_ATTEMPTS, DEFAULT_COMMAND_RETRY_MAX_ATTEMPTS
+                ),
+            ): COMMAND_RETRY_MAX_ATTEMPTS_SELECTOR,
+            vol.Required(
+                CONF_COMMAND_THROTTLE_INTERVAL,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(
+                    CONF_COMMAND_THROTTLE_INTERVAL, DEFAULT_COMMAND_THROTTLE_INTERVAL
+                ),
+            ): COMMAND_THROTTLE_INTERVAL_SELECTOR,
+            vol.Optional(
+                CONF_UN_IGNORES,
+                default=existing_parameters,
+            ): SelectSelector(
+                config=SelectSelectorConfig(
+                    mode=SelectSelectorMode.DROPDOWN,
+                    multiple=True,
+                    sort=False,
+                    options=all_un_ignore_parameters,
+                )
+            ),
+            vol.Optional(
+                CONF_ENABLE_SUB_DEVICES,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_ENABLE_SUB_DEVICES, DEFAULT_ENABLE_SUB_DEVICES),
+            ): BOOLEAN_SELECTOR,
+            vol.Optional(
+                CONF_DISABLE_CONFIG_PANEL,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_DISABLE_CONFIG_PANEL, DEFAULT_DISABLE_CONFIG_PANEL),
+            ): BOOLEAN_SELECTOR,
+            vol.Optional(
+                CONF_ENABLE_LIGHT_LAST_BRIGHTNESS,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(
+                    CONF_ENABLE_LIGHT_LAST_BRIGHTNESS, DEFAULT_ENABLE_LIGHT_LAST_BRIGHTNESS
+                ),
+            ): BOOLEAN_SELECTOR,
+            vol.Optional(
+                CONF_USE_GROUP_CHANNEL_FOR_COVER_STATE,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(
+                    CONF_USE_GROUP_CHANNEL_FOR_COVER_STATE, DEFAULT_USE_GROUP_CHANNEL_FOR_COVER_STATE
+                ),
+            ): BOOLEAN_SELECTOR,
+            vol.Optional(
+                CONF_OPTIONAL_SETTINGS,
+                default=data.get(CONF_ADVANCED_CONFIG, {}).get(CONF_OPTIONAL_SETTINGS, DEFAULT_OPTIONAL_SETTINGS),
+            ): SelectSelector(
+                config=SelectSelectorConfig(
+                    mode=SelectSelectorMode.DROPDOWN,
+                    multiple=True,
+                    sort=True,
+                    options=[str(v) for v in OptionalSettings],
+                )
+            ),
+        }
+    )
+    if not all_un_ignore_parameters:
+        del advanced_settings_schema.schema[CONF_UN_IGNORES]
+    return advanced_settings_schema
+
+
+def get_loom_advanced_settings_schema(data: ConfigType) -> Schema:
+    """Return the reduced advanced-settings schema for the openccu-loom backend.
+
+    The daemon owns CCU-behaviour parity (hub scans, markers, light/cover
+    behaviour, firmware, device creation) per-central, so only the HA-side
+    toggles remain configurable here. Callbacks, MQTT, command pacing and
+    interface/parameter options are the daemon's concern and are omitted.
+
+    The config-panel toggle is omitted too: the panel is not registered
+    for loom entries at all, so the switch would offer a choice that does
+    not exist. Device pages link at the daemon's own Config UI instead.
+    """
+    advanced_config = data.get(CONF_ADVANCED_CONFIG, {})
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_ENABLE_SYSTEM_NOTIFICATIONS,
+                default=advanced_config.get(CONF_ENABLE_SYSTEM_NOTIFICATIONS, DEFAULT_ENABLE_SYSTEM_NOTIFICATIONS),
+            ): BOOLEAN_SELECTOR,
+            vol.Optional(
+                CONF_ENABLE_SUB_DEVICES,
+                default=advanced_config.get(CONF_ENABLE_SUB_DEVICES, DEFAULT_ENABLE_SUB_DEVICES),
+            ): BOOLEAN_SELECTOR,
+        }
+    )
+
+
+async def _async_validate_config_and_get_system_information(
+    hass: HomeAssistant, data: ConfigType, entry_id: str
+) -> SystemInformation | None:
+    """Validate the user input allows us to connect."""
+    control_config = ControlConfig(hass=hass, entry_id=entry_id, data=data)
+    await control_config.check_config()
+    return await validate_config_and_get_system_information(control_config=control_config)
+
+
+async def _async_detect_backend(
+    host: str,
+    username: str,
+    password: str,
+) -> BackendDetectionResult | None:
+    """Detect backend type and available interfaces."""
+    config = DetectionConfig(
+        host=host,
+        username=username,
+        password=password,
+    )
+    return await detect_backend(config=config)
+
+
+class DomainConfigFlow(ConfigFlow, domain=DOMAIN):
+    """Handle the instance flow for Homematic(IP) Local for OpenCCU."""
+
+    VERSION = 17
+    CONNECTION_CLASS = CONN_CLASS_LOCAL_PUSH
+
+    def __init__(self) -> None:
+        """Init the ConfigFlow."""
+        self.data: ConfigType = {}
+        self.serial: str | None = None
+        # openccu-loom mDNS discovery state (carried across token/CCU steps).
+        self._loom_discovery: dict[str, Any] = {}
+        self._loom_token: str | None = None
+        self._loom_enable_sub_devices: bool = DEFAULT_LOOM_ENABLE_SUB_DEVICES
+        # User-chosen instance name from the manual loom form; discovered
+        # daemons name the entry after the selected CCU instead.
+        self._loom_instance_name: str | None = None
+        self._loom_ccus: list[dict[str, Any]] = []
+        self._loom_discovered_daemons: list[dict[str, Any]] = []
+        self._loom_skip_browse: bool = False
+        self._detection_result: BackendDetectionResult | None = None
+        self._detection_task: asyncio.Task[None] | None = None
+        self._detection_start_time: float | None = None
+        self._detection_error: str | None = None
+        self._detection_error_detail: str | None = None
+        self._validation_error: str | None = None
+        self._undetected_interfaces: list[Interface] = []
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        """Get the options flow for this handler."""
+        return HomematicIPLocalOptionsFlowHandler(config_entry)
+
+    async def async_step_advanced(
+        self,
+        advanced_input: ConfigType | None = None,
+    ) -> ConfigFlowResult:
+        """Handle the advanced step."""
+        if advanced_input is None:
+            _LOGGER.debug("ConfigFlow.step_advanced, no user input")
+            return self.async_show_form(
+                step_id="advanced",
+                data_schema=get_advanced_schema(
+                    data=self.data,
+                    all_un_ignore_parameters=[],
+                ),
+                description_placeholders=_get_step_placeholders(STEP_ADVANCED, TOTAL_STEPS_ADVANCED),
+            )
+        _update_advanced_input(data=self.data, advanced_input=advanced_input)
+        return await self._validate_and_finish_config_flow()
+
+    async def async_step_central(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Handle the initial step."""
+        if user_input is not None:
+            self.data = _get_ccu_data(self.data, user_input=user_input)
+            # Check if user wants to skip backend detection
+            if user_input.get(CONF_SKIP_BACKEND_DETECTION, False):
+                _LOGGER.debug("User skipped backend detection")
+                # Skip directly to interface step without detection
+                return await self.async_step_interface()
+            # Start detection task and show progress
+            if not self._detection_task:
+                self._detection_start_time = time.monotonic()
+                self._detection_task = self.hass.async_create_task(
+                    self._async_run_detection(), "homematicip_local_detect_backend"
+                )
+            return await self.async_step_detect()
+
+        return self.async_show_form(
+            step_id="central",
+            data_schema=get_domain_schema(data=self.data),
+            description_placeholders=_get_step_placeholders(STEP_CENTRAL, TOTAL_STEPS_BASIC),
+        )
+
+    async def async_step_central_error(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Handle return to central step with validation error."""
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = _get_step_placeholders(STEP_CENTRAL, TOTAL_STEPS_BASIC)
+
+        if self._detection_error:
+            errors["base"] = self._detection_error
+            # Always set invalid_items placeholder to avoid showing literal [{invalid_items}] in message
+            description_placeholders["invalid_items"] = self._detection_error_detail or self.data.get(CONF_HOST, "")
+            # Add detailed error information
+            description_placeholders["error_detail"] = self._detection_error_detail or ""
+            description_placeholders["retry_hint"] = _get_retry_hint(self._detection_error)
+
+        # Reset detection error state
+        self._detection_error = None
+        self._detection_error_detail = None
+
+        return self.async_show_form(
+            step_id="central",
+            data_schema=get_domain_schema(data=self.data),
+            errors=errors,
+            description_placeholders=description_placeholders,
+        )
+
+    async def async_step_configure_advanced(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Go to advanced configuration."""
+        return await self.async_step_advanced()
+
+    async def async_step_detect(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Handle the backend detection step."""
+        # Wait briefly for task to complete if it's very fast
+        if self._detection_task and not self._detection_task.done():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(self._detection_task), timeout=0.1)
+
+        if self._detection_task and not self._detection_task.done():
+            # Check for timeout
+            if self._detection_start_time is not None:
+                elapsed = time.monotonic() - self._detection_start_time
+                if elapsed > BACKEND_DETECTION_TIMEOUT:
+                    _LOGGER.warning(
+                        "Backend detection timed out after %.1fs for host %s - proceeding with manual configuration",
+                        elapsed,
+                        self.data.get(CONF_HOST, "unknown"),
+                    )
+                    # Cancel the task and proceed with graceful degradation
+                    self._detection_task.cancel()
+                    self._detection_task = None
+                    self._detection_start_time = None
+                    self._detection_result = None
+                    # Continue to interface step for manual configuration
+                    return self.async_show_progress_done(next_step_id="interface")
+
+            # Still running within timeout - show progress
+            return self.async_show_progress(
+                step_id="detect",
+                progress_action="detect_backend",
+                progress_task=self._detection_task,
+            )
+
+        # Task is done - check for errors during detection
+        if self._detection_error:
+            _LOGGER.debug(
+                "Backend detection failed with error '%s' - proceeding to manual configuration",
+                self._detection_error,
+            )
+            self._detection_task = None
+            self._detection_start_time = None
+            # Continue to interface step instead of showing error
+            return self.async_show_progress_done(next_step_id="interface")
+
+        # Detection complete successfully, proceed to interface step
+        self._detection_start_time = None
+        return self.async_show_progress_done(next_step_id="interface")
+
+    async def async_step_finish_or_configure(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Show menu to choose between finishing setup or configuring advanced options."""
+        description_placeholders: dict[str, str] = {"undetected_interfaces_warning": ""}
+
+        # Check for undetected interfaces and add warning if necessary
+        self._undetected_interfaces = self._get_undetected_interfaces()
+        if self._undetected_interfaces:
+            undetected_names = ", ".join(i.value for i in self._undetected_interfaces)
+            description_placeholders["undetected_interfaces_warning"] = (
+                f"\n\n**Warning:** The following interfaces were enabled but not detected "
+                f"on the CCU: {undetected_names}. These interfaces may not work correctly."
+            )
+            _LOGGER.warning(
+                "The following interfaces were enabled but not detected on the CCU: %s",
+                undetected_names,
+            )
+
+        return self.async_show_menu(
+            step_id="finish_or_configure",
+            menu_options=["finish_setup", "configure_advanced"],
+            description_placeholders=description_placeholders,
+        )
+
+    async def async_step_finish_setup(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Finish the config flow without advanced settings."""
+        return await self._validate_and_finish_config_flow()
+
+    async def async_step_interface(
+        self,
+        interface_input: ConfigType | None = None,
+    ) -> ConfigFlowResult:
+        """Handle the interface step (TLS + interface checkboxes, optional custom ports)."""
+        # Only process interface_input if it actually contains interface fields
+        # (not if it's leftover user_input from previous steps)
+        if interface_input is not None and CONF_ENABLE_HMIP_RF in interface_input:
+            # Use simplified update function (automatic ports based on TLS)
+            _update_tls_interfaces_input(data=self.data, interface_input=interface_input)
+
+            # Check if user wants to configure custom ports
+            if interface_input.get(CONF_CUSTOM_PORT_CONFIG, False):
+                _LOGGER.debug("User requested custom port configuration")
+                return await self.async_step_port_config()
+
+            # Check for undetected interfaces BEFORE validation
+            undetected = self._get_undetected_interfaces()
+            if undetected:
+                undetected_names = ", ".join(i.value for i in undetected)
+                _LOGGER.warning(
+                    "User enabled interfaces that were not detected on the CCU: %s",
+                    undetected_names,
+                )
+                placeholders = _get_step_placeholders(STEP_INTERFACE, TOTAL_STEPS_BASIC)
+                placeholders["detected_interfaces"] = "-"
+                if self._detection_result:
+                    placeholders["detected_backend"] = self._detection_result.backend.value
+                    placeholders["detected_interfaces"] = ", ".join(
+                        i.value for i in self._detection_result.available_interfaces
+                    )
+                    placeholders["detected_tls"] = str(
+                        self._detection_result.tls or self._detection_result.https_redirect_enabled
+                    )
+                placeholders["invalid_items"] = undetected_names
+                return self.async_show_form(
+                    step_id="interface",
+                    data_schema=get_tls_interfaces_schema(data=self.data),
+                    errors={"base": "interface_not_available"},
+                    description_placeholders=placeholders,
+                )
+
+            # User didn't request custom ports - validate with defaults
+            try:
+                await _async_validate_config_and_get_system_information(
+                    hass=self.hass, data=self.data, entry_id="validate"
+                )
+                # Validation successful - proceed to finish or advanced config
+                return await self.async_step_finish_or_configure()
+            except AuthFailure:
+                # Auth errors should go back to central step - changing ports won't fix auth
+                _LOGGER.debug("Authentication failed, returning to central step")
+                self._detection_error = "invalid_auth"
+                self._detection_error_detail = self.data.get(CONF_HOST, "")
+                return await self.async_step_central_error()
+            except (NoConnectionException, InvalidConfig, BaseHomematicException) as ex:
+                # Connection/config errors - stay on interface page so user can adjust settings
+                _LOGGER.debug("Validation failed, showing error on interface page: %s", ex)
+                error_msg = str(ex) or self.data.get(CONF_HOST, "")
+                placeholders = _get_step_placeholders(STEP_INTERFACE, TOTAL_STEPS_BASIC)
+                placeholders["detected_interfaces"] = "-"
+                if self._detection_result:
+                    placeholders["detected_backend"] = self._detection_result.backend.value
+                    placeholders["detected_interfaces"] = ", ".join(
+                        i.value for i in self._detection_result.available_interfaces
+                    )
+                    placeholders["detected_tls"] = str(
+                        self._detection_result.tls or self._detection_result.https_redirect_enabled
+                    )
+                placeholders["invalid_items"] = error_msg
+                return self.async_show_form(
+                    step_id="interface",
+                    data_schema=get_tls_interfaces_schema(data=self.data),
+                    errors={"base": "cannot_connect"},
+                    description_placeholders=placeholders,
+                )
+
+        _LOGGER.debug("ConfigFlow.step_interface, no user input")
+        placeholders = _get_step_placeholders(STEP_INTERFACE, TOTAL_STEPS_BASIC)
+        placeholders["detected_interfaces"] = "-"
+        # Add detection result info if available
+        if self._detection_result:
+            placeholders["detected_backend"] = self._detection_result.backend.value
+            placeholders["detected_interfaces"] = ", ".join(
+                i.value for i in self._detection_result.available_interfaces
+            )
+            placeholders["detected_tls"] = str(
+                self._detection_result.tls or self._detection_result.https_redirect_enabled
+            )
+        return self.async_show_form(
+            step_id="interface",
+            data_schema=get_tls_interfaces_schema(data=self.data),
+            description_placeholders=placeholders,
+        )
+
+    async def async_step_loom(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Configure an openccu-loom daemon backend (mDNS browse → manual).
+
+        The manual form validates the daemon connection, lists its CCUs and
+        routes into the shared CCU-selection step, so manual setups are
+        serial-keyed (dedup, in-place backend switch) like discovered ones.
+        """
+        # On entry (no input yet) actively browse for daemons and offer a
+        # selection; fall back to the manual form when none are found or the
+        # user opted out of discovery in the pick step.
+        if (
+            user_input is None
+            and not self._loom_skip_browse
+            and (daemons := await _async_browse_loom_daemons(self.hass))
+        ):
+            self._loom_discovered_daemons = daemons
+            return await self.async_step_loom_pick()
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = {
+            "invalid_items": "",
+            "error_detail": "",
+            "retry_hint": "",
+        }
+        if user_input is not None:
+            self.data = {
+                CONF_BACKEND: BACKEND_LOOM,
+                CONF_INSTANCE_NAME: user_input[CONF_INSTANCE_NAME],
+                CONF_HOST: user_input[CONF_HOST],
+                CONF_TLS: user_input.get(CONF_TLS, True),
+                CONF_VERIFY_TLS: user_input.get(CONF_VERIFY_TLS, True),
+                CONF_ADVANCED_CONFIG: {
+                    CONF_ENABLE_SUB_DEVICES: user_input.get(CONF_ENABLE_SUB_DEVICES, DEFAULT_LOOM_ENABLE_SUB_DEVICES)
+                },
+            }
+            if (port := user_input.get(CONF_LOOM_PORT)) is not None:
+                self.data[CONF_LOOM_PORT] = int(port)
+            if token := user_input.get(CONF_LOOM_TOKEN):
+                self.data[CONF_LOOM_TOKEN] = token
+            try:
+                await ControlConfig(hass=self.hass, entry_id="validate", data=self.data).check_config()
+                ccus = await _async_loom_list_ccus(
+                    self.hass,
+                    host=self.data[CONF_HOST],
+                    port=self.data.get(CONF_LOOM_PORT),
+                    tls=self.data[CONF_TLS],
+                    token=self.data.get(CONF_LOOM_TOKEN, ""),
+                    base_path=None,
+                )
+            except AuthFailure:
+                errors["base"] = "invalid_auth"
+                description_placeholders["invalid_items"] = self.data.get(CONF_HOST, "")
+            except InvalidConfig as exc:
+                _LOGGER.warning("Loom backend config invalid: %s", exc)
+                errors["base"] = "invalid_config"
+                description_placeholders["invalid_items"] = (exc.args[0] if exc.args else "") or self.data.get(
+                    CONF_HOST, ""
+                )
+            except _loom_incompatible_version_error():
+                # Must precede BaseHomematicException, which it subclasses.
+                errors["base"] = "incompatible_version"
+                description_placeholders["invalid_items"] = self.data.get(CONF_HOST, "")
+            except BaseHomematicException as exc:
+                errors["base"] = "cannot_connect"
+                description_placeholders["invalid_items"] = (exc.args[0] if exc.args else "") or self.data.get(
+                    CONF_HOST, ""
+                )
+            else:
+                if not ccus:
+                    errors["base"] = "no_ccus"
+                else:
+                    # Route into the shared CCU-selection step so manual
+                    # setups get the same serial-keyed dedup and in-place
+                    # backend switch as discovered daemons.
+                    self._loom_token = self.data.get(CONF_LOOM_TOKEN)
+                    self._loom_enable_sub_devices = self.data[CONF_ADVANCED_CONFIG][CONF_ENABLE_SUB_DEVICES]
+                    self._loom_instance_name = user_input[CONF_INSTANCE_NAME]
+                    self._loom_discovery = {
+                        CONF_HOST: self.data[CONF_HOST],
+                        CONF_TLS: self.data[CONF_TLS],
+                        CONF_VERIFY_TLS: self.data[CONF_VERIFY_TLS],
+                        CONF_INSTANCE_NAME: user_input[CONF_INSTANCE_NAME],
+                    }
+                    if (port := self.data.get(CONF_LOOM_PORT)) is not None:
+                        self._loom_discovery[CONF_LOOM_PORT] = port
+                    self._loom_ccus = ccus
+                    return await self.async_step_loom_select_ccu()
+        return self.async_show_form(
+            step_id="loom",
+            data_schema=get_loom_schema(data=self.data),
+            errors=errors,
+            description_placeholders=description_placeholders,
+        )
+
+    async def async_step_loom_pick(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Pick a discovered openccu-loom daemon (or choose manual entry)."""
+        daemons = self._loom_discovered_daemons
+        if len(daemons) == 1:
+            self._loom_discovery = daemons[0]
+            return await self.async_step_loom_token()
+        if user_input is not None:
+            choice = user_input[CONF_LOOM_DAEMON]
+            if choice == LOOM_MANUAL_DAEMON:
+                self._loom_skip_browse = True
+                return await self.async_step_loom()
+            self._loom_discovery = next(d for d in daemons if _loom_daemon_key(d) == choice)
+            return await self.async_step_loom_token()
+        options = [
+            SelectOptionDict(
+                value=_loom_daemon_key(d),
+                label=f"{d[CONF_INSTANCE_NAME]} ({d[CONF_HOST]}:{d[CONF_LOOM_PORT]})",
+            )
+            for d in daemons
+        ]
+        options.append(SelectOptionDict(value=LOOM_MANUAL_DAEMON, label="Manual entry"))
+        return self.async_show_form(
+            step_id="loom_pick",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_LOOM_DAEMON): SelectSelector(
+                        SelectSelectorConfig(options=options, mode=SelectSelectorMode.DROPDOWN)
+                    )
+                }
+            ),
+        )
+
+    async def async_step_loom_select_ccu(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Pick which CCU served by the discovered daemon to add."""
+        ccus = self._loom_ccus
+        if len(ccus) == 1:
+            return await self._async_create_loom_entry(ccus[0])
+        if user_input is not None:
+            # The SelectSelector restricts input to a valid serial.
+            chosen = next(c for c in ccus if c["serial"] == user_input[CONF_LOOM_CCU])
+            return await self._async_create_loom_entry(chosen)
+        options = [SelectOptionDict(value=c["serial"], label=f"{c['name']} ({c['serial']})") for c in ccus]
+        return self.async_show_form(
+            step_id="loom_select_ccu",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_LOOM_CCU): SelectSelector(
+                        SelectSelectorConfig(options=options, mode=SelectSelectorMode.DROPDOWN)
+                    )
+                }
+            ),
+        )
+
+    async def async_step_loom_token(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Collect the bearer token for a discovered daemon, then list its CCUs."""
+        errors: dict[str, str] = {}
+        disc = self._loom_discovery
+        description_placeholders: dict[str, str] = {
+            CONF_NAME: disc.get(CONF_INSTANCE_NAME, ""),
+            CONF_HOST: disc.get(CONF_HOST, ""),
+            "invalid_items": "",
+        }
+        if user_input is not None:
+            token = user_input.get(CONF_LOOM_TOKEN) or ""
+            self._loom_enable_sub_devices = user_input.get(CONF_ENABLE_SUB_DEVICES, DEFAULT_LOOM_ENABLE_SUB_DEVICES)
+            try:
+                ccus = await _async_loom_list_ccus(
+                    self.hass,
+                    host=disc[CONF_HOST],
+                    port=disc.get(CONF_LOOM_PORT),
+                    tls=disc[CONF_TLS],
+                    token=token,
+                    base_path=disc.get(CONF_LOOM_BASE_PATH),
+                )
+            except AuthFailure:
+                errors["base"] = "invalid_auth"
+            except _loom_incompatible_version_error():
+                # Must precede BaseHomematicException, which it subclasses.
+                errors["base"] = "incompatible_version"
+                description_placeholders["invalid_items"] = disc[CONF_HOST]
+            except BaseHomematicException as exc:
+                errors["base"] = "cannot_connect"
+                description_placeholders["invalid_items"] = (exc.args[0] if exc.args else "") or disc[CONF_HOST]
+            else:
+                if not ccus:
+                    errors["base"] = "no_ccus"
+                else:
+                    self._loom_token = token
+                    self._loom_ccus = ccus
+                    return await self.async_step_loom_select_ccu()
+        return self.async_show_form(
+            step_id="loom_token",
+            data_schema=get_loom_token_schema(data=disc),
+            errors=errors,
+            description_placeholders=description_placeholders,
+        )
+
+    async def async_step_port_config(
+        self,
+        port_input: ConfigType | None = None,
+    ) -> ConfigFlowResult:
+        """Handle port configuration step (shown on validation error or advanced config)."""
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = {
+            "invalid_items": "",
+            "error_detail": "",
+            "retry_hint": "",
+        }
+
+        if port_input is not None:
+            _update_port_config_input(data=self.data, port_input=port_input)
+
+            # Validate configuration with updated ports
+            try:
+                await _async_validate_config_and_get_system_information(
+                    hass=self.hass, data=self.data, entry_id="validate"
+                )
+                # Validation successful - proceed to finish or advanced config
+                return await self.async_step_finish_or_configure()
+            except AuthFailure:
+                errors["base"] = "invalid_auth"
+                description_placeholders["invalid_items"] = self.data.get(CONF_HOST, "")
+            except InvalidConfig as ic:
+                errors["base"] = "invalid_config"
+                description_placeholders["invalid_items"] = str(ic)
+            except NoConnectionException as exc:
+                errors["base"] = "cannot_connect"
+                description_placeholders["invalid_items"] = str(exc) or self.data.get(CONF_HOST, "")
+            except BaseHomematicException as bhe:
+                errors["base"] = "cannot_connect"
+                description_placeholders["invalid_items"] = bhe.args[0] if bhe.args else self.data.get(CONF_HOST, "")
+
+        # Show validation error from interface step if present
+        if not errors and hasattr(self, "_validation_error") and self._validation_error:
+            errors["base"] = "cannot_connect"
+            description_placeholders["invalid_items"] = self._validation_error
+            description_placeholders["error_detail"] = (
+                "Default ports did not work. Please adjust the port configuration below."
+            )
+            description_placeholders["retry_hint"] = (
+                "Check if your CCU uses non-standard ports or if a firewall blocks the connection."
+            )
+            self._validation_error = None
+
+        # Add TLS status info to placeholders
+        tls_enabled = self.data.get(CONF_TLS, False)
+        description_placeholders["tls_status"] = "enabled" if tls_enabled else "disabled"
+
+        return self.async_show_form(
+            step_id="port_config",
+            data_schema=get_port_config_schema(data=self.data),
+            errors=errors,
+            description_placeholders=description_placeholders,
+        )
+
+    async def async_step_reauth(self, entry_data: ConfigType) -> ConfigFlowResult:
+        """Handle reauthorization request when credentials become invalid."""
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        if entry is None:
+            return self.async_abort(reason="reauth_failed")
+
+        # Store entry data for use in confirm step
+        self.data = dict(entry.data)
+
+        # Set title placeholders for flow title display
+        self.context["title_placeholders"] = {
+            CONF_NAME: self.data.get(CONF_INSTANCE_NAME, ""),
+            CONF_HOST: self.data.get(CONF_HOST, ""),
+            CONF_BACKEND: _get_backend_title(backend=self.data.get(CONF_BACKEND)),
+        }
+
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Handle reauthorization confirmation - prompt for new credentials."""
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        if entry is None:
+            return self.async_abort(reason="reauth_failed")
+
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = _get_step_placeholders(STEP_REAUTH, TOTAL_STEPS_REAUTH)
+        description_placeholders["host"] = self.data.get(CONF_HOST, "")
+
+        if user_input is not None:
+            # Update credentials in stored data
+            self.data[CONF_USERNAME] = user_input[CONF_USERNAME]
+            self.data[CONF_PASSWORD] = user_input[CONF_PASSWORD]
+
+            # Validate new credentials
+            try:
+                await _async_validate_config_and_get_system_information(
+                    hass=self.hass, data=self.data, entry_id=entry.entry_id
+                )
+                # Validation successful - update entry and finish
+                return self._async_update_reload_and_abort_entry(
+                    entry=entry, data=self.data, reason="reauth_successful"
+                )
+            except AuthFailure:
+                errors["base"] = "invalid_auth"
+                description_placeholders["invalid_items"] = self.data.get(CONF_HOST, "")
+                description_placeholders["error_detail"] = ""
+                description_placeholders["retry_hint"] = _get_retry_hint("invalid_auth")
+            except NoConnectionException as exc:
+                errors["base"] = "cannot_connect"
+                description_placeholders["invalid_items"] = str(exc) or self.data.get(CONF_HOST, "")
+                description_placeholders["error_detail"] = ""
+                description_placeholders["retry_hint"] = _get_retry_hint("cannot_connect")
+            except ValidationException as ve:
+                errors["base"] = "invalid_config"
+                description_placeholders["invalid_items"] = str(ve) or self.data.get(CONF_HOST, "")
+                description_placeholders["error_detail"] = ""
+                description_placeholders["retry_hint"] = _get_retry_hint("invalid_config")
+            except BaseHomematicException as bhe:
+                errors["base"] = "cannot_connect"
+                description_placeholders["invalid_items"] = bhe.args[0] if bhe.args else self.data.get(CONF_HOST, "")
+                description_placeholders["error_detail"] = ""
+                description_placeholders["retry_hint"] = _get_retry_hint("cannot_connect")
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=get_reauth_schema(self.data),
+            errors=errors,
+            description_placeholders=description_placeholders,
+        )
+
+    async def async_step_reconfigure(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Handle reconfiguration of the integration - step 1: connection settings."""
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        if entry is None:
+            return self.async_abort(reason="reconfigure_failed")
+
+        # Set title placeholders for flow title display
+        self.context["title_placeholders"] = {
+            CONF_NAME: entry.data.get(CONF_INSTANCE_NAME, ""),
+            CONF_HOST: entry.data.get(CONF_HOST, ""),
+            CONF_BACKEND: _get_backend_title(backend=entry.data.get(CONF_BACKEND)),
+        }
+
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = _get_step_placeholders(STEP_RECONFIGURE, TOTAL_STEPS_RECONFIGURE)
+
+        # Check for errors from interface step (auth failure redirects here)
+        if self._detection_error:
+            errors["base"] = self._detection_error
+            description_placeholders["invalid_items"] = self._detection_error_detail or self.data.get(CONF_HOST, "")
+            description_placeholders["error_detail"] = self._detection_error_detail or ""
+            description_placeholders["retry_hint"] = _get_retry_hint(self._detection_error)
+            self._detection_error = None
+            self._detection_error_detail = None
+
+        if user_input is not None:
+            # Store connection data and proceed to interface step
+            self.data = dict(entry.data)
+            self.data[CONF_HOST] = user_input[CONF_HOST]
+            self.data[CONF_USERNAME] = user_input[CONF_USERNAME]
+            self.data[CONF_PASSWORD] = user_input[CONF_PASSWORD]
+            return await self.async_step_reconfigure_interface()
+
+        # Use existing data if available (for returning with errors), otherwise entry data
+        schema_data = self.data or dict(entry.data)
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=get_reconfigure_schema(schema_data),
+            errors=errors,
+            description_placeholders=description_placeholders,
+        )
+
+    async def async_step_reconfigure_interface(self, interface_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Handle reconfiguration - step 2: TLS and interface settings (same semantics as config flow)."""
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        if entry is None:
+            return self.async_abort(reason="reconfigure_failed")
+
+        if interface_input is not None and CONF_ENABLE_HMIP_RF in interface_input:
+            # Use simplified update function (automatic ports based on TLS)
+            _update_tls_interfaces_input(data=self.data, interface_input=interface_input)
+
+            # Check if user wants to configure custom ports
+            if interface_input.get(CONF_CUSTOM_PORT_CONFIG, False):
+                _LOGGER.debug("Reconfigure: User requested custom port configuration")
+                return await self.async_step_reconfigure_port_config()
+
+            # User didn't request custom ports - validate with defaults
+            try:
+                await _async_validate_config_and_get_system_information(
+                    hass=self.hass, data=self.data, entry_id=entry.entry_id
+                )
+                # Validation successful - finish reconfiguration
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data=self.data,
+                    reason="reconfigure_successful",
+                )
+            except AuthFailure:
+                # Auth errors should go back to reconfigure step
+                _LOGGER.debug("Reconfigure: Authentication failed, returning to reconfigure step")
+                self._detection_error = "invalid_auth"
+                self._detection_error_detail = self.data.get(CONF_HOST, "")
+                return await self.async_step_reconfigure()
+            except (NoConnectionException, InvalidConfig, BaseHomematicException) as ex:
+                # Connection/config errors - show port configuration
+                _LOGGER.debug("Reconfigure: Validation failed with default ports, showing port config: %s", ex)
+                self._validation_error = str(ex) or self.data.get(CONF_HOST, "")
+                return await self.async_step_reconfigure_port_config()
+
+        return self.async_show_form(
+            step_id="reconfigure_interface",
+            data_schema=get_tls_interfaces_schema(data=self.data),
+            description_placeholders=_get_step_placeholders(STEP_RECONFIGURE_TLS, TOTAL_STEPS_RECONFIGURE),
+        )
+
+    async def async_step_reconfigure_port_config(self, port_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Handle reconfiguration - port configuration (shown on request or validation error)."""
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        if entry is None:
+            return self.async_abort(reason="reconfigure_failed")
+
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = {
+            "invalid_items": "",
+            "error_detail": "",
+            "retry_hint": "",
+        }
+
+        if port_input is not None:
+            _update_port_config_input(data=self.data, port_input=port_input)
+
+            # Validate configuration with updated ports
+            try:
+                await _async_validate_config_and_get_system_information(
+                    hass=self.hass, data=self.data, entry_id=entry.entry_id
+                )
+                # Validation successful - finish reconfiguration
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data=self.data,
+                    reason="reconfigure_successful",
+                )
+            except AuthFailure:
+                errors["base"] = "invalid_auth"
+                description_placeholders["invalid_items"] = self.data.get(CONF_HOST, "")
+            except InvalidConfig as ic:
+                errors["base"] = "invalid_config"
+                description_placeholders["invalid_items"] = str(ic)
+            except NoConnectionException as exc:
+                errors["base"] = "cannot_connect"
+                description_placeholders["invalid_items"] = str(exc) or self.data.get(CONF_HOST, "")
+            except BaseHomematicException as bhe:
+                errors["base"] = "cannot_connect"
+                description_placeholders["invalid_items"] = bhe.args[0] if bhe.args else self.data.get(CONF_HOST, "")
+
+        # Show validation error from interface step if present
+        if not errors and hasattr(self, "_validation_error") and self._validation_error:
+            errors["base"] = "cannot_connect"
+            description_placeholders["invalid_items"] = self._validation_error
+            description_placeholders["error_detail"] = (
+                "Default ports did not work. Please adjust the port configuration below."
+            )
+            description_placeholders["retry_hint"] = (
+                "Check if your CCU uses non-standard ports or if a firewall blocks the connection."
+            )
+            self._validation_error = None
+
+        # Add TLS status info to placeholders
+        tls_enabled = self.data.get(CONF_TLS, False)
+        description_placeholders["tls_status"] = "enabled" if tls_enabled else "disabled"
+
+        return self.async_show_form(
+            step_id="reconfigure_port_config",
+            data_schema=get_port_config_schema(data=self.data),
+            errors=errors,
+            description_placeholders=description_placeholders,
+        )
+
+    async def async_step_ssdp(self, discovery_info: ssdp.SsdpServiceInfo) -> ConfigFlowResult:
+        """Handle a discovered Homematic CCU."""
+        _LOGGER.debug("Homematic(IP) Local for OpenCCU SSDP discovery %s", pformat(discovery_info))
+        instance_name = _get_instance_name(friendly_name=discovery_info.upnp.get("friendlyName")) or "OpenCCU"
+        serial = _get_serial(model_description=discovery_info.upnp.get("modelDescription"))
+
+        host = cast(str, urlparse(discovery_info.ssdp_location).hostname)
+        await self.async_set_unique_id(serial)
+
+        self._abort_if_unique_id_configured(
+            updates={},
+            error="already_configured",
+            description_placeholders={"serial": serial or "unknown"},
+        )
+
+        self.data = {CONF_INSTANCE_NAME: instance_name, CONF_HOST: host}
+        self.context["title_placeholders"] = {
+            CONF_NAME: instance_name,
+            CONF_HOST: host,
+            CONF_BACKEND: _get_backend_title(backend=BACKEND_CCU),
+        }
+        return await self.async_step_user()
+
+    async def async_step_user(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Pick the backend: direct CCU (aiohomematic) or openccu-loom daemon.
+
+        Discovery and re-entry that already carry CCU data skip straight
+        to the central step. A fresh user-initiated setup gets the backend
+        menu only when the loom backend is relevant; otherwise it goes
+        straight to the direct-CCU setup.
+        """
+        if user_input is not None or self.data.get(CONF_HOST):
+            return await self.async_step_central(user_input=user_input)
+        if not self._loom_is_relevant():
+            return await self.async_step_central(user_input=user_input)
+        return self.async_show_menu(step_id="user", menu_options=["central", "loom"])
+
+    async def async_step_zeroconf(self, discovery_info: ZeroconfServiceInfo) -> ConfigFlowResult:
+        """Handle an openccu-loom daemon discovered via mDNS.
+
+        Daemons that announce their served CCU serials (TXT key ``ccus``)
+        are deduplicated per CCU: configured loom entries follow the
+        daemon's announced host/port, and the card is suppressed once every
+        announced CCU is set up on the loom backend. A serial configured on
+        the direct-CCU backend keeps the card as the discovery path to the
+        in-place backend switch. Pre-``ccus`` daemons fall back to a
+        host/port match against existing loom entries.
+        """
+        host = discovery_info.host
+        port = discovery_info.port
+        if not host or not port:
+            return self.async_abort(reason="invalid_discovery_info")
+        props = discovery_info.properties
+        instance = props.get("instance") or discovery_info.name.removesuffix(f".{ZEROCONF_TYPE}")
+        base_path = props.get("path") or DEFAULT_LOOM_BASE_PATH
+        # The daemon listener is plain (TLS is terminated upstream), so tls is
+        # advertised as 0; honour the TXT but it is effectively always plain.
+        tls = str(props.get("tls", "0")).lower() not in ("0", "", "false")
+        loom_entries = [
+            entry
+            for entry in self._async_current_entries(include_ignore=False)
+            if entry.data.get(CONF_BACKEND) == BACKEND_LOOM
+        ]
+        if announced_serials := [s for s in (props.get("ccus") or "").replace(" ", "").split(",") if s]:
+            entries_by_serial = {entry.unique_id: entry for entry in loom_entries if entry.unique_id}
+            for entry in (entries_by_serial[s] for s in announced_serials if s in entries_by_serial):
+                if entry.data.get(CONF_HOST) != host or entry.data.get(CONF_LOOM_PORT) != port:
+                    # Follow the daemon to its announced endpoint (IP change).
+                    self._async_update_entry_and_reload(
+                        entry=entry, data={**entry.data, CONF_HOST: host, CONF_LOOM_PORT: port}
+                    )
+            if all(s in entries_by_serial for s in announced_serials):
+                # Every announced CCU is already set up on the loom backend.
+                return self.async_abort(
+                    reason="already_configured",
+                    description_placeholders={"serial": ", ".join(announced_serials)},
+                )
+        else:
+            # Pre-`ccus` daemons: best-effort dedup on the daemon endpoint.
+            for entry in loom_entries:
+                if entry.data.get(CONF_HOST) == host and entry.data.get(CONF_LOOM_PORT) == port:
+                    return self.async_abort(
+                        reason="already_configured",
+                        description_placeholders={"serial": entry.unique_id or "unknown"},
+                    )
+        # Dedup repeat announcements of the same daemon; per-CCU dedup (the
+        # entry's serial) happens above and in the CCU-selection step.
+        await self.async_set_unique_id(f"loom-daemon-{host}-{port}")
+        self._loom_discovery = {
+            CONF_HOST: host,
+            CONF_LOOM_PORT: port,
+            CONF_TLS: tls,
+            CONF_LOOM_BASE_PATH: base_path,
+            CONF_INSTANCE_NAME: instance,
+        }
+        self.context["title_placeholders"] = {
+            CONF_NAME: instance,
+            CONF_HOST: host,
+            CONF_BACKEND: _get_backend_title(backend=BACKEND_LOOM),
+        }
+        return await self.async_step_loom_token()
+
+    def _apply_detected_interfaces(self) -> None:
+        """Apply detected interfaces to config data."""
+        if not self._detection_result:
+            return
+
+        # Use TLS setting from data (already computed from detection result)
+        use_tls = self.data.get(CONF_TLS, False)
+        interfaces: dict[Interface, dict[str, Any]] = {}
+
+        for interface in self._detection_result.available_interfaces:
+            if default_port := get_interface_default_port(interface=interface, tls=use_tls):
+                interface_config: dict[str, Any] = {CONF_PORT: default_port}
+                # Add path for VirtualDevices
+                if interface == Interface.VIRTUAL_DEVICES:
+                    interface_config[CONF_PATH] = IF_VIRTUAL_DEVICES_PATH
+                interfaces[interface] = interface_config
+
+        self.data[CONF_INTERFACE] = interfaces
+
+    @callback
+    def _async_abort_daemon_discovery_flows(self) -> None:
+        """Abort lingering mDNS discovery cards for the daemon in use.
+
+        A passively discovered card stays in progress when the same daemon
+        is set up through another path (active browse, manual form); once
+        the CCU decision is made in :meth:`_async_create_loom_entry`, such
+        cards are stale.
+        """
+        disc = self._loom_discovery
+        daemon_unique_id = f"loom-daemon-{disc.get(CONF_HOST)}-{disc.get(CONF_LOOM_PORT)}"
+        for flow in self._async_in_progress(include_uninitialized=True):
+            if flow["context"].get("unique_id") == daemon_unique_id:
+                self.hass.config_entries.flow.async_abort(flow["flow_id"])
+
+    async def _async_create_loom_entry(self, ccu: dict[str, Any]) -> ConfigFlowResult:
+        """Create the config entry for the chosen CCU on a discovered daemon.
+
+        A serial already configured on the direct-CCU backend is switched
+        to the loom backend in place: the existing entry keeps its
+        entry_id, instance name and advanced config (incl.
+        sub_devices_enabled), so entities and history survive the switch.
+        """
+        disc = self._loom_discovery
+        serial = ccu["serial"]
+        # A concurrent CCU discovery (e.g. SSDP) may hold an in-progress flow
+        # with this serial; we have already committed to the loom backend here,
+        # so do not abort our own flow. Finishing the flow below auto-aborts
+        # the now-redundant discovery card.
+        existing_entry = await self.async_set_unique_id(serial, raise_on_progress=False)
+        # The daemon's discovery card is stale in every outcome below.
+        self._async_abort_daemon_discovery_flows()
+        instance_name = self._loom_instance_name or ccu["name"]
+        data: ConfigType = {
+            CONF_BACKEND: BACKEND_LOOM,
+            CONF_INSTANCE_NAME: instance_name,
+            CONF_HOST: disc[CONF_HOST],
+            CONF_TLS: disc[CONF_TLS],
+            CONF_VERIFY_TLS: disc.get(CONF_VERIFY_TLS, True),
+            CONF_ADVANCED_CONFIG: {CONF_ENABLE_SUB_DEVICES: self._loom_enable_sub_devices},
+        }
+        # mDNS always advertises a port; the manual form may leave it blank
+        # (the loom client applies its TLS-dependent default at runtime).
+        if (port := disc.get(CONF_LOOM_PORT)) is not None:
+            data[CONF_LOOM_PORT] = int(port)
+        if self._loom_token:
+            data[CONF_LOOM_TOKEN] = self._loom_token
+        if existing_entry is not None:
+            if existing_entry.data.get(CONF_BACKEND, BACKEND_CCU) == BACKEND_LOOM:
+                return self.async_abort(
+                    reason="already_configured",
+                    description_placeholders={"serial": serial or "unknown"},
+                )
+            # In-place backend switch CCU -> loom. The stale CCU connection
+            # keys (credentials, interfaces) stay in the entry so a switch
+            # back is lossless; the reload re-keys the entities via the
+            # unique_id migration in __init__.
+            switched = dict(existing_entry.data)
+            switched.update(data)
+            # The instance name keys entity naming - keep it stable.
+            switched[CONF_INSTANCE_NAME] = existing_entry.data[CONF_INSTANCE_NAME]
+            # Migrate the advanced config; an explicit sub_devices_enabled
+            # choice on the entry wins over the form value.
+            switched[CONF_ADVANCED_CONFIG] = {
+                CONF_ENABLE_SUB_DEVICES: self._loom_enable_sub_devices,
+                **existing_entry.data.get(CONF_ADVANCED_CONFIG, {}),
+            }
+            return self._async_update_reload_and_abort_entry(
+                entry=existing_entry, data=switched, reason="backend_switched"
+            )
+        return self.async_create_entry(title=instance_name, data=data)
+
+    async def _async_run_detection(self) -> None:
+        """Run backend detection as background task."""
+        try:
+            self._detection_result = await _async_detect_backend(
+                host=self.data[CONF_HOST],
+                username=self.data[CONF_USERNAME],
+                password=self.data[CONF_PASSWORD],
+            )
+        except AuthFailure:
+            _LOGGER.warning("Backend detection failed: invalid authentication")
+            self._detection_error = "invalid_auth"
+            self._detection_error_detail = self.data[CONF_HOST]
+            return
+        except ValidationException as ve:
+            _LOGGER.warning("Backend detection failed: invalid configuration - %s", ve)
+            self._detection_error = "invalid_config"
+            self._detection_error_detail = str(ve)
+            return
+        except NoConnectionException as ex:
+            _LOGGER.warning("Backend detection failed: connection error - %s", ex)
+            self._detection_error = "cannot_connect"
+            self._detection_error_detail = str(ex) or self.data[CONF_HOST]
+            return
+        except BaseHomematicException as ex:
+            _LOGGER.warning("Backend detection failed: %s - %s", type(ex).__name__, ex)
+            self._detection_error = "cannot_connect"
+            self._detection_error_detail = str(ex) or self.data[CONF_HOST]
+            return
+
+        if self._detection_result:
+            # Enable TLS if detected via connection or if HTTPS redirect is enabled on CCU
+            use_tls = self._detection_result.tls or self._detection_result.https_redirect_enabled is True
+            _LOGGER.debug(
+                "Backend detection successful: backend=%s, interfaces=%s, tls=%s, auth_enabled=%s, https_redirect=%s, use_tls=%s",
+                self._detection_result.backend,
+                self._detection_result.available_interfaces,
+                self._detection_result.tls,
+                self._detection_result.auth_enabled,
+                self._detection_result.https_redirect_enabled,
+                use_tls,
+            )
+            # Update TLS setting based on detection
+            self.data[CONF_TLS] = use_tls
+            # Pre-populate interfaces based on detection
+            self._apply_detected_interfaces()
+        else:
+            # No backend found - could be connection, auth, or config issue
+            _LOGGER.warning("Backend detection failed: no backend found at host %s", self.data[CONF_HOST])
+            self._detection_error = "detection_failed"
+            self._detection_error_detail = self.data[CONF_HOST]
+
+    @callback
+    def _async_update_entry_and_reload(self, *, entry: ConfigEntry, data: ConfigType) -> None:
+        """Update the entry and trigger exactly one reload.
+
+        Replaces :meth:`ConfigFlow.async_update_reload_and_abort` for this
+        integration: a loaded entry already reloads through the registered
+        update listener when its data changes, so scheduling a reload as
+        well would reload twice (deprecated with HA 2026.12). Only unloaded
+        entries and unchanged data need the explicit reload.
+        """
+        changed = self.hass.config_entries.async_update_entry(entry, data=data)
+        if not (changed and entry.state is ConfigEntryState.LOADED):
+            self.hass.config_entries.async_schedule_reload(entry.entry_id)
+
+    @callback
+    def _async_update_reload_and_abort_entry(
+        self, *, entry: ConfigEntry, data: ConfigType, reason: str
+    ) -> ConfigFlowResult:
+        """Update the entry, trigger exactly one reload and abort the flow."""
+        self._async_update_entry_and_reload(entry=entry, data=data)
+        return self.async_abort(reason=reason)
+
+    def _get_undetected_interfaces(self) -> list[Interface]:
+        """Return list of enabled interfaces that were not detected on the CCU."""
+        if not self._detection_result:
+            return []
+
+        detected = set(self._detection_result.available_interfaces)
+        configured = set(self.data.get(CONF_INTERFACE, {}).keys())
+
+        return sorted(configured - detected, key=lambda i: i.value)
+
+    def _loom_is_relevant(self) -> bool:
+        """Return whether the openccu-loom backend should be offered.
+
+        The backend is surfaced only when there is evidence that it is in
+        use: a daemon currently announcing itself via mDNS (a discovery
+        flow is in progress) or an already configured loom entry. Setups
+        without a daemon never see a backend choice.
+        """
+        if any(
+            entry.data.get(CONF_BACKEND) == BACKEND_LOOM for entry in self._async_current_entries(include_ignore=False)
+        ):
+            return True
+        return bool(
+            self.hass.config_entries.flow.async_progress_by_handler(
+                DOMAIN, include_uninitialized=True, match_context={"source": SOURCE_ZEROCONF}
+            )
+        )
+
+    async def _validate_and_finish_config_flow(self) -> ConfigFlowResult:
+        """Validate and finish the config flow.
+
+        A serial already configured on the loom backend is switched to the
+        direct-CCU backend in place: the existing entry keeps its entry_id,
+        instance name and advanced config (incl. sub_devices_enabled), so
+        entities and history survive the switch.
+        """
+
+        errors = {}
+        description_placeholders = {}
+
+        try:
+            system_information = await _async_validate_config_and_get_system_information(
+                hass=self.hass, data=self.data, entry_id="validate"
+            )
+            if system_information is not None:
+                serial = system_information.serial
+                existing_entry = await self.async_set_unique_id(serial)
+                if existing_entry is not None:
+                    if existing_entry.data.get(CONF_BACKEND, BACKEND_CCU) != BACKEND_LOOM:
+                        return self.async_abort(
+                            reason="already_configured",
+                            description_placeholders={"serial": serial or "unknown"},
+                        )
+                    # In-place backend switch loom -> CCU. The stale loom
+                    # connection keys (daemon port, token) stay in the entry
+                    # so a switch back is lossless; the reload re-keys the
+                    # entities via the unique_id migration in __init__.
+                    switched = dict(existing_entry.data)
+                    switched.update(self.data)
+                    # The instance name keys entity naming - keep it stable.
+                    switched[CONF_INSTANCE_NAME] = existing_entry.data[CONF_INSTANCE_NAME]
+                    # Migrate the advanced config; settings collected in this
+                    # flow's advanced step win over the entry's values.
+                    switched[CONF_ADVANCED_CONFIG] = {
+                        **existing_entry.data.get(CONF_ADVANCED_CONFIG, {}),
+                        **self.data.get(CONF_ADVANCED_CONFIG, {}),
+                    }
+                    return self._async_update_reload_and_abort_entry(
+                        entry=existing_entry, data=switched, reason="backend_switched"
+                    )
+        except AuthFailure:
+            errors["base"] = "invalid_auth"
+            description_placeholders["invalid_items"] = self.data[CONF_HOST]
+        except InvalidConfig as ic:
+            errors["base"] = "invalid_config"
+            description_placeholders["invalid_items"] = ic.args[0]
+        except BaseHomematicException as bhe:
+            errors["base"] = "cannot_connect"
+            description_placeholders["invalid_items"] = bhe.args[0]
+        else:
+            return self.async_create_entry(title=self.data[CONF_INSTANCE_NAME], data=self.data)
+
+        return self.async_show_form(
+            step_id="central",
+            data_schema=get_domain_schema(data=self.data),
+            errors=errors,
+            description_placeholders=description_placeholders,
+        )
+
+
+class HomematicIPLocalOptionsFlowHandler(OptionsFlow):
+    """Handle Homematic(IP) Local for OpenCCU options."""
+
+    def __init__(self, entry: ConfigEntry) -> None:
+        """Initialize Homematic(IP) Local for OpenCCU options flow."""
+        self.entry = entry
+        self._control_unit: ControlUnit = entry.runtime_data
+        self.data: ConfigType = deepcopy(dict(self.entry.data))
+        self._validation_error: str | None = None
+
+    @property
+    def _is_loom(self) -> bool:
+        """Return whether this entry uses the openccu-loom backend."""
+        return self.entry.data.get(CONF_BACKEND) == BACKEND_LOOM
+
+    async def async_step_advanced_settings(self, advanced_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Handle advanced settings (MQTT, device options, etc.)."""
+        if self._is_loom:
+            if advanced_input is not None:
+                _update_loom_advanced_settings_input(data=self.data, advanced_input=advanced_input)
+                self.hass.config_entries.async_update_entry(entry=self.entry, data=self.data)
+                return self.async_create_entry(title="", data=dict(self.entry.options))
+            return self.async_show_form(
+                step_id="advanced_settings",
+                data_schema=get_loom_advanced_settings_schema(data=self.data),
+            )
+
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = {}
+
+        if advanced_input is not None:
+            _update_advanced_settings_input(data=self.data, advanced_input=advanced_input)
+            try:
+                system_information = await _async_validate_config_and_get_system_information(
+                    hass=self.hass, data=self.data, entry_id=self.entry.entry_id
+                )
+                if system_information is not None:
+                    self.hass.config_entries.async_update_entry(
+                        entry=self.entry,
+                        unique_id=system_information.serial,
+                        data=self.data,
+                    )
+                return self.async_create_entry(title="", data=dict(self.entry.options))
+            except AuthFailure:
+                errors["base"] = "invalid_auth"
+                description_placeholders["invalid_items"] = self.data[CONF_HOST]
+            except InvalidConfig as ic:
+                errors["base"] = "invalid_config"
+                description_placeholders["invalid_items"] = ic.args[0]
+            except BaseHomematicException as bhe:
+                errors["base"] = "cannot_connect"
+                description_placeholders["invalid_items"] = bhe.args[0]
+
+        return self.async_show_form(
+            step_id="advanced_settings",
+            data_schema=get_advanced_settings_schema(
+                data=self.data,
+                all_un_ignore_parameters=self._control_unit.central.query_facade.get_un_ignore_candidates(
+                    include_master=True
+                ),
+            ),
+            errors=errors,
+            description_placeholders=description_placeholders,
+        )
+
+    async def async_step_connection(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Handle connection settings (host, credentials)."""
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = {}
+
+        if user_input is not None:
+            self.data = _get_ccu_data(self.data, user_input=user_input)
+            try:
+                system_information = await _async_validate_config_and_get_system_information(
+                    hass=self.hass, data=self.data, entry_id=self.entry.entry_id
+                )
+                if system_information is not None:
+                    self.hass.config_entries.async_update_entry(
+                        entry=self.entry,
+                        unique_id=system_information.serial,
+                        data=self.data,
+                    )
+                return self.async_create_entry(title="", data=dict(self.entry.options))
+            except AuthFailure:
+                errors["base"] = "invalid_auth"
+                description_placeholders["invalid_items"] = self.data[CONF_HOST]
+            except InvalidConfig as ic:
+                errors["base"] = "invalid_config"
+                description_placeholders["invalid_items"] = ic.args[0]
+            except BaseHomematicException as bhe:
+                errors["base"] = "cannot_connect"
+                description_placeholders["invalid_items"] = bhe.args[0]
+
+        return self.async_show_form(
+            step_id="connection",
+            data_schema=get_options_schema(data=self.data),
+            errors=errors,
+            description_placeholders=description_placeholders,
+        )
+
+    async def async_step_init(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Show menu for options configuration."""
+        if self._is_loom:
+            # The daemon owns interfaces and program/sysvar scanning, so those
+            # steps are omitted; the connection step targets the daemon.
+            return self.async_show_menu(
+                step_id="init",
+                menu_options=["loom_connection", "advanced_settings", "permissions"],
+            )
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["connection", "interfaces", "programs_sysvars", "advanced_settings", "permissions"],
+        )
+
+    async def async_step_interfaces(self, interface_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Handle interface configuration (TLS + interface checkboxes, same as Config Flow)."""
+        if interface_input is not None and CONF_ENABLE_HMIP_RF in interface_input:
+            # Use simplified update function (automatic ports based on TLS)
+            _update_tls_interfaces_input(data=self.data, interface_input=interface_input)
+
+            # Check if user wants to configure custom ports
+            if interface_input.get(CONF_CUSTOM_PORT_CONFIG, False):
+                _LOGGER.debug("Options Flow: User requested custom port configuration")
+                return await self.async_step_interfaces_port_config()
+
+            # User didn't request custom ports - validate with defaults
+            try:
+                system_information = await _async_validate_config_and_get_system_information(
+                    hass=self.hass, data=self.data, entry_id=self.entry.entry_id
+                )
+                if system_information is not None:
+                    self.hass.config_entries.async_update_entry(
+                        entry=self.entry,
+                        unique_id=system_information.serial,
+                        data=self.data,
+                    )
+                return self.async_create_entry(title="", data=dict(self.entry.options))
+            except AuthFailure:
+                # Auth errors should go back to connection step
+                _LOGGER.debug("Options Flow: Authentication failed")
+                return self.async_show_form(
+                    step_id="interfaces",
+                    data_schema=get_tls_interfaces_schema(data=self.data),
+                    errors={"base": "invalid_auth"},
+                    description_placeholders={"invalid_items": self.data[CONF_HOST]},
+                )
+            except (NoConnectionException, InvalidConfig, BaseHomematicException) as ex:
+                # Connection/config errors - show port configuration
+                _LOGGER.debug("Options Flow: Validation failed with default ports, showing port config: %s", ex)
+                self._validation_error = str(ex) or self.data.get(CONF_HOST, "")
+                return await self.async_step_interfaces_port_config()
+
+        return self.async_show_form(
+            step_id="interfaces",
+            data_schema=get_tls_interfaces_schema(data=self.data),
+        )
+
+    async def async_step_interfaces_port_config(self, port_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Handle port configuration for Options Flow (shown on request or validation error)."""
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = {
+            "invalid_items": "",
+            "error_detail": "",
+            "retry_hint": "",
+        }
+
+        if port_input is not None:
+            _update_port_config_input(data=self.data, port_input=port_input)
+
+            # Validate configuration with updated ports
+            try:
+                system_information = await _async_validate_config_and_get_system_information(
+                    hass=self.hass, data=self.data, entry_id=self.entry.entry_id
+                )
+                if system_information is not None:
+                    self.hass.config_entries.async_update_entry(
+                        entry=self.entry,
+                        unique_id=system_information.serial,
+                        data=self.data,
+                    )
+                return self.async_create_entry(title="", data=dict(self.entry.options))
+            except AuthFailure:
+                errors["base"] = "invalid_auth"
+                description_placeholders["invalid_items"] = self.data[CONF_HOST]
+            except InvalidConfig as ic:
+                errors["base"] = "invalid_config"
+                description_placeholders["invalid_items"] = str(ic)
+            except NoConnectionException as exc:
+                errors["base"] = "cannot_connect"
+                description_placeholders["invalid_items"] = str(exc) or self.data.get(CONF_HOST, "")
+            except BaseHomematicException as bhe:
+                errors["base"] = "cannot_connect"
+                description_placeholders["invalid_items"] = bhe.args[0] if bhe.args else self.data.get(CONF_HOST, "")
+
+        # Show validation error from interfaces step if present
+        if not errors and hasattr(self, "_validation_error") and self._validation_error:
+            errors["base"] = "cannot_connect"
+            description_placeholders["invalid_items"] = self._validation_error
+            description_placeholders["error_detail"] = (
+                "Default ports did not work. Please adjust the port configuration below."
+            )
+            description_placeholders["retry_hint"] = (
+                "Check if your CCU uses non-standard ports or if a firewall blocks the connection."
+            )
+            self._validation_error = None
+
+        # Add TLS status info to placeholders
+        tls_enabled = self.data.get(CONF_TLS, False)
+        description_placeholders["tls_status"] = "enabled" if tls_enabled else "disabled"
+
+        return self.async_show_form(
+            step_id="interfaces_port_config",
+            data_schema=get_port_config_schema(data=self.data),
+            errors=errors,
+            description_placeholders=description_placeholders,
+        )
+
+    async def async_step_loom_connection(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Handle openccu-loom daemon connection settings (host, port, TLS, token)."""
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = {"invalid_items": ""}
+
+        if user_input is not None:
+            self.data = _get_loom_data(self.data, user_input=user_input)
+            try:
+                await ControlConfig(hass=self.hass, entry_id=self.entry.entry_id, data=self.data).check_config()
+            except (InvalidConfig, BaseHomematicException) as exc:
+                errors["base"] = "invalid_config"
+                description_placeholders["invalid_items"] = (exc.args[0] if exc.args else "") or self.data.get(
+                    CONF_HOST, ""
+                )
+            else:
+                self.hass.config_entries.async_update_entry(entry=self.entry, data=self.data)
+                return self.async_create_entry(title="", data=dict(self.entry.options))
+
+        return self.async_show_form(
+            step_id="loom_connection",
+            data_schema=get_loom_options_schema(data=self.data),
+            errors=errors,
+            description_placeholders=description_placeholders,
+        )
+
+    async def async_step_permissions(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Handle non-admin permission settings."""
+        if user_input is not None:
+            if user_input.get(CONF_NON_ADMIN_PERMISSIONS, False):
+                permissions: list[str] = ["schedule_edit"]
+            else:
+                permissions = []
+            new_options = dict(self.entry.options)
+            new_options[CONF_NON_ADMIN_PERMISSIONS] = permissions
+            self.hass.config_entries.async_update_entry(entry=self.entry, options=new_options)
+            return self.async_create_entry(title="", data=new_options)
+
+        current_enabled = "schedule_edit" in self.entry.options.get(CONF_NON_ADMIN_PERMISSIONS, [])
+        return self.async_show_form(
+            step_id="permissions",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_NON_ADMIN_PERMISSIONS,
+                        default=current_enabled,
+                    ): BOOLEAN_SELECTOR,
+                }
+            ),
+        )
+
+    async def async_step_programs_sysvars(self, user_input: ConfigType | None = None) -> ConfigFlowResult:
+        """Handle programs and system variables configuration."""
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = {}
+
+        if user_input is not None:
+            # Update only program/sysvar related settings
+            advanced_config = self.data.get(CONF_ADVANCED_CONFIG, {})
+            advanced_config[CONF_ENABLE_PROGRAM_SCAN] = user_input.get(
+                CONF_ENABLE_PROGRAM_SCAN, DEFAULT_ENABLE_PROGRAM_SCAN
+            )
+            advanced_config[CONF_PROGRAM_MARKERS] = user_input.get(CONF_PROGRAM_MARKERS, DEFAULT_PROGRAM_MARKERS)
+            advanced_config[CONF_ENABLE_SYSVAR_SCAN] = user_input.get(
+                CONF_ENABLE_SYSVAR_SCAN, DEFAULT_ENABLE_SYSVAR_SCAN
+            )
+            advanced_config[CONF_SYSVAR_MARKERS] = user_input.get(CONF_SYSVAR_MARKERS, DEFAULT_SYSVAR_MARKERS)
+            advanced_config[CONF_SYS_SCAN_INTERVAL] = user_input.get(CONF_SYS_SCAN_INTERVAL, DEFAULT_SYS_SCAN_INTERVAL)
+            self.data[CONF_ADVANCED_CONFIG] = advanced_config
+            try:
+                system_information = await _async_validate_config_and_get_system_information(
+                    hass=self.hass, data=self.data, entry_id=self.entry.entry_id
+                )
+                if system_information is not None:
+                    self.hass.config_entries.async_update_entry(
+                        entry=self.entry,
+                        unique_id=system_information.serial,
+                        data=self.data,
+                    )
+                return self.async_create_entry(title="", data=dict(self.entry.options))
+            except AuthFailure:
+                errors["base"] = "invalid_auth"
+                description_placeholders["invalid_items"] = self.data[CONF_HOST]
+            except InvalidConfig as ic:
+                errors["base"] = "invalid_config"
+                description_placeholders["invalid_items"] = ic.args[0]
+            except BaseHomematicException as bhe:
+                errors["base"] = "cannot_connect"
+                description_placeholders["invalid_items"] = bhe.args[0]
+
+        advanced_config = self.data.get(CONF_ADVANCED_CONFIG, {})
+        return self.async_show_form(
+            step_id="programs_sysvars",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_ENABLE_PROGRAM_SCAN,
+                        default=advanced_config.get(CONF_ENABLE_PROGRAM_SCAN, DEFAULT_ENABLE_PROGRAM_SCAN),
+                    ): BOOLEAN_SELECTOR,
+                    vol.Optional(
+                        CONF_PROGRAM_MARKERS,
+                        default=advanced_config.get(CONF_PROGRAM_MARKERS, DEFAULT_PROGRAM_MARKERS),
+                    ): SelectSelector(
+                        config=SelectSelectorConfig(
+                            mode=SelectSelectorMode.DROPDOWN,
+                            multiple=True,
+                            sort=True,
+                            options=[str(v) for v in DescriptionMarker if v != DescriptionMarker.HAHM],
+                        )
+                    ),
+                    vol.Required(
+                        CONF_ENABLE_SYSVAR_SCAN,
+                        default=advanced_config.get(CONF_ENABLE_SYSVAR_SCAN, DEFAULT_ENABLE_SYSVAR_SCAN),
+                    ): BOOLEAN_SELECTOR,
+                    vol.Optional(
+                        CONF_SYSVAR_MARKERS,
+                        default=advanced_config.get(CONF_SYSVAR_MARKERS, DEFAULT_SYSVAR_MARKERS),
+                    ): SelectSelector(
+                        config=SelectSelectorConfig(
+                            mode=SelectSelectorMode.DROPDOWN,
+                            multiple=True,
+                            sort=True,
+                            options=[str(v) for v in DescriptionMarker],
+                        )
+                    ),
+                    vol.Required(
+                        CONF_SYS_SCAN_INTERVAL,
+                        default=advanced_config.get(CONF_SYS_SCAN_INTERVAL, DEFAULT_SYS_SCAN_INTERVAL),
+                    ): SCAN_INTERVAL_SELECTOR,
+                }
+            ),
+            errors=errors,
+            description_placeholders=description_placeholders,
+        )
+
+
+def _get_loom_data(data: ConfigType, user_input: ConfigType) -> ConfigType:
+    """Merge openccu-loom daemon connection input into the existing entry data."""
+    loom_data = dict(data)
+    loom_data[CONF_HOST] = user_input[CONF_HOST]
+    loom_data[CONF_TLS] = user_input.get(CONF_TLS, True)
+    loom_data[CONF_VERIFY_TLS] = user_input.get(CONF_VERIFY_TLS, True)
+    if (port := user_input.get(CONF_LOOM_PORT)) is not None:
+        loom_data[CONF_LOOM_PORT] = int(port)
+    elif CONF_LOOM_PORT in loom_data:
+        del loom_data[CONF_LOOM_PORT]
+    if token := user_input.get(CONF_LOOM_TOKEN):
+        loom_data[CONF_LOOM_TOKEN] = token
+    elif CONF_LOOM_TOKEN in loom_data:
+        del loom_data[CONF_LOOM_TOKEN]
+    return loom_data
+
+
+def _update_loom_advanced_settings_input(data: ConfigType, advanced_input: ConfigType) -> None:
+    """Update data with the loom backend's HA-side advanced settings only.
+
+    The daemon owns CCU-behaviour parity, so only the HA-side toggles are
+    written; existing advanced-config keys are preserved untouched.
+    """
+    if not advanced_input:
+        return
+    advanced_config = dict(data.get(CONF_ADVANCED_CONFIG, {}))
+    advanced_config[CONF_ENABLE_SYSTEM_NOTIFICATIONS] = advanced_input[CONF_ENABLE_SYSTEM_NOTIFICATIONS]
+    advanced_config[CONF_ENABLE_SUB_DEVICES] = advanced_input.get(CONF_ENABLE_SUB_DEVICES, DEFAULT_ENABLE_SUB_DEVICES)
+    advanced_config[CONF_DISABLE_CONFIG_PANEL] = advanced_input.get(
+        CONF_DISABLE_CONFIG_PANEL, DEFAULT_DISABLE_CONFIG_PANEL
+    )
+    data[CONF_ADVANCED_CONFIG] = advanced_config
+
+
+def _get_ccu_data(data: ConfigType, user_input: ConfigType) -> ConfigType:
+    """Get CCU data from user input. TLS and ports are set from interface step or detection."""
+    ccu_data = {
+        CONF_BACKEND: BACKEND_CCU,
+        CONF_INSTANCE_NAME: user_input.get(CONF_INSTANCE_NAME, data.get(CONF_INSTANCE_NAME)),
+        CONF_HOST: user_input[CONF_HOST],
+        CONF_USERNAME: user_input[CONF_USERNAME],
+        CONF_PASSWORD: user_input[CONF_PASSWORD],
+        # TLS and JSON port preserved from data (set by detection or interface step)
+        CONF_TLS: data.get(CONF_TLS, DEFAULT_TLS),
+        CONF_VERIFY_TLS: data.get(CONF_VERIFY_TLS, False),
+        CONF_INTERFACE: data.get(CONF_INTERFACE, {}),
+        CONF_ADVANCED_CONFIG: data.get(CONF_ADVANCED_CONFIG, {}),
+    }
+    # Callback settings: prefer user_input (Options Flow), fall back to data (Config Flow Advanced step)
+    if ((callback_host := user_input.get(CONF_CALLBACK_HOST)) and callback_host.strip() != "") or (
+        (callback_host := data.get(CONF_CALLBACK_HOST)) and callback_host.strip() != ""
+    ):
+        ccu_data[CONF_CALLBACK_HOST] = callback_host
+    if (callback_port_xml_rpc := user_input.get(CONF_CALLBACK_PORT_XML_RPC)) is not None or (
+        callback_port_xml_rpc := data.get(CONF_CALLBACK_PORT_XML_RPC)
+    ) is not None:
+        ccu_data[CONF_CALLBACK_PORT_XML_RPC] = callback_port_xml_rpc
+    # JSON port is preserved from data (set by interface step)
+    if (json_port := data.get(CONF_JSON_PORT)) is not None:
+        ccu_data[CONF_JSON_PORT] = json_port
+
+    return ccu_data
+
+
+def _update_interface_input(data: ConfigType, interface_input: ConfigType) -> None:
+    """Update data with interface input including TLS settings and JSON port."""
+    if not interface_input:
+        return
+
+    # Update TLS settings from interface input
+    data[CONF_TLS] = interface_input[CONF_TLS]
+    data[CONF_VERIFY_TLS] = interface_input[CONF_VERIFY_TLS]
+
+    # Update JSON port from interface input
+    if (json_port := interface_input.get(CONF_JSON_PORT)) is not None:
+        data[CONF_JSON_PORT] = json_port
+    elif CONF_JSON_PORT in data:
+        del data[CONF_JSON_PORT]
+
+    # Update interface configuration
+    data[CONF_INTERFACE] = {}
+    if interface_input[CONF_ENABLE_HMIP_RF] is True:
+        data[CONF_INTERFACE][Interface.HMIP_RF] = {
+            CONF_PORT: interface_input[CONF_HMIP_RF_PORT],
+        }
+    if interface_input[CONF_ENABLE_BIDCOS_RF] is True:
+        data[CONF_INTERFACE][Interface.BIDCOS_RF] = {
+            CONF_PORT: interface_input[CONF_BIDCOS_RF_PORT],
+        }
+    if interface_input[CONF_ENABLE_VIRTUAL_DEVICES] is True:
+        data[CONF_INTERFACE][Interface.VIRTUAL_DEVICES] = {
+            CONF_PORT: interface_input[CONF_VIRTUAL_DEVICES_PORT],
+            CONF_PATH: interface_input.get(CONF_VIRTUAL_DEVICES_PATH),
+        }
+    if interface_input[CONF_ENABLE_BIDCOS_WIRED] is True:
+        data[CONF_INTERFACE][Interface.BIDCOS_WIRED] = {
+            CONF_PORT: interface_input[CONF_BIDCOS_WIRED_PORT],
+        }
+    if interface_input[CONF_ENABLE_CCU_JACK] is True:
+        data[CONF_INTERFACE][Interface.CCU_JACK] = {}
+    if interface_input[CONF_ENABLE_CUXD] is True:
+        data[CONF_INTERFACE][Interface.CUXD] = {}
+
+
+def _update_tls_interfaces_input(data: ConfigType, interface_input: ConfigType) -> None:
+    """Update data with TLS + interface selection using default ports (for simplified flow)."""
+    if not interface_input:
+        return
+
+    # Update TLS settings from interface input
+    tls = interface_input[CONF_TLS]
+    data[CONF_TLS] = tls
+    data[CONF_VERIFY_TLS] = interface_input[CONF_VERIFY_TLS]
+
+    # Get custom ports (if any)
+    custom_ports: dict[str, int] = data.get(CONF_CUSTOM_PORTS, {})
+
+    # Update interface configuration with default ports (or custom if set)
+    data[CONF_INTERFACE] = {}
+
+    def _get_port(interface: Interface) -> int:
+        """Get custom port if available, otherwise TLS-based default."""
+        if interface.value in custom_ports:
+            return int(custom_ports[interface.value])
+        return int(get_interface_default_port(interface=interface, tls=tls) or 0)
+
+    if interface_input[CONF_ENABLE_HMIP_RF] is True:
+        data[CONF_INTERFACE][Interface.HMIP_RF] = {CONF_PORT: _get_port(Interface.HMIP_RF)}
+    if interface_input[CONF_ENABLE_BIDCOS_RF] is True:
+        data[CONF_INTERFACE][Interface.BIDCOS_RF] = {CONF_PORT: _get_port(Interface.BIDCOS_RF)}
+    if interface_input[CONF_ENABLE_VIRTUAL_DEVICES] is True:
+        data[CONF_INTERFACE][Interface.VIRTUAL_DEVICES] = {
+            CONF_PORT: _get_port(Interface.VIRTUAL_DEVICES),
+            CONF_PATH: IF_VIRTUAL_DEVICES_PATH,
+        }
+    if interface_input[CONF_ENABLE_BIDCOS_WIRED] is True:
+        data[CONF_INTERFACE][Interface.BIDCOS_WIRED] = {CONF_PORT: _get_port(Interface.BIDCOS_WIRED)}
+    if interface_input[CONF_ENABLE_CCU_JACK] is True:
+        data[CONF_INTERFACE][Interface.CCU_JACK] = {}
+    if interface_input[CONF_ENABLE_CUXD] is True:
+        data[CONF_INTERFACE][Interface.CUXD] = {}
+
+
+def _update_port_config_input(data: ConfigType, port_input: ConfigType) -> None:
+    """
+    Update data with port configuration input (for custom port configuration).
+
+    Note: Callback settings have been moved to advanced configuration.
+    """
+    if not port_input:
+        return
+
+    tls = data.get(CONF_TLS, False)
+    interfaces = data.get(CONF_INTERFACE, {})
+
+    # Track custom ports (non-default)
+    custom_ports: dict[str, int] = data.get(CONF_CUSTOM_PORTS, {})
+
+    # Update JSON port
+    if (json_port := port_input.get(CONF_JSON_PORT)) and json_port != get_json_rpc_default_port(tls=tls):
+        data[CONF_JSON_PORT] = json_port
+    elif CONF_JSON_PORT in data:
+        del data[CONF_JSON_PORT]
+
+    # Update interface ports
+    for interface in (Interface.HMIP_RF, Interface.BIDCOS_RF, Interface.VIRTUAL_DEVICES, Interface.BIDCOS_WIRED):
+        if interface not in interfaces:
+            continue
+
+        port_key = {
+            Interface.HMIP_RF: CONF_HMIP_RF_PORT,
+            Interface.BIDCOS_RF: CONF_BIDCOS_RF_PORT,
+            Interface.VIRTUAL_DEVICES: CONF_VIRTUAL_DEVICES_PORT,
+            Interface.BIDCOS_WIRED: CONF_BIDCOS_WIRED_PORT,
+        }[interface]
+
+        if port_key in port_input:
+            port = port_input[port_key]
+            interfaces[interface][CONF_PORT] = port
+            # Track if it's a custom (non-default) port
+            if not is_interface_default_port(interface=interface, port=port):
+                custom_ports[interface.value] = port
+            elif interface.value in custom_ports:
+                del custom_ports[interface.value]
+
+    # Update VirtualDevices path if present
+    if Interface.VIRTUAL_DEVICES in interfaces and CONF_VIRTUAL_DEVICES_PATH in port_input:
+        interfaces[Interface.VIRTUAL_DEVICES][CONF_PATH] = port_input[CONF_VIRTUAL_DEVICES_PATH]
+
+    # Store custom ports only if non-empty
+    if custom_ports:
+        data[CONF_CUSTOM_PORTS] = custom_ports
+    elif CONF_CUSTOM_PORTS in data:
+        del data[CONF_CUSTOM_PORTS]
+
+
+def _update_advanced_input(data: ConfigType, advanced_input: ConfigType) -> None:
+    """Update data with advanced input (for advanced step with all fields including callbacks)."""
+    if not advanced_input:
+        return
+
+    # Update callback settings (moved here from port config)
+    if callback_host := advanced_input.get(CONF_CALLBACK_HOST):
+        data[CONF_CALLBACK_HOST] = callback_host
+    elif CONF_CALLBACK_HOST in data:
+        del data[CONF_CALLBACK_HOST]
+
+    if callback_port := advanced_input.get(CONF_CALLBACK_PORT_XML_RPC):
+        data[CONF_CALLBACK_PORT_XML_RPC] = callback_port
+    elif CONF_CALLBACK_PORT_XML_RPC in data:
+        del data[CONF_CALLBACK_PORT_XML_RPC]
+
+    # Update advanced config settings
+    data[CONF_ADVANCED_CONFIG] = {}
+    data[CONF_ADVANCED_CONFIG][CONF_LISTEN_ON_ALL_IP] = advanced_input[CONF_LISTEN_ON_ALL_IP]
+    data[CONF_ADVANCED_CONFIG][CONF_PROGRAM_MARKERS] = advanced_input[CONF_PROGRAM_MARKERS]
+    data[CONF_ADVANCED_CONFIG][CONF_ENABLE_PROGRAM_SCAN] = advanced_input[CONF_ENABLE_PROGRAM_SCAN]
+    data[CONF_ADVANCED_CONFIG][CONF_SYSVAR_MARKERS] = advanced_input[CONF_SYSVAR_MARKERS]
+    data[CONF_ADVANCED_CONFIG][CONF_ENABLE_SYSVAR_SCAN] = advanced_input[CONF_ENABLE_SYSVAR_SCAN]
+    data[CONF_ADVANCED_CONFIG][CONF_SYS_SCAN_INTERVAL] = advanced_input[CONF_SYS_SCAN_INTERVAL]
+    data[CONF_ADVANCED_CONFIG][CONF_ENABLE_SYSTEM_NOTIFICATIONS] = advanced_input[CONF_ENABLE_SYSTEM_NOTIFICATIONS]
+    data[CONF_ADVANCED_CONFIG][CONF_ENABLE_MQTT] = advanced_input[CONF_ENABLE_MQTT]
+    data[CONF_ADVANCED_CONFIG][CONF_MQTT_PREFIX] = advanced_input[CONF_MQTT_PREFIX]
+    data[CONF_ADVANCED_CONFIG][CONF_ENABLE_SUB_DEVICES] = advanced_input[CONF_ENABLE_SUB_DEVICES]
+    data[CONF_ADVANCED_CONFIG][CONF_DISABLE_CONFIG_PANEL] = advanced_input[CONF_DISABLE_CONFIG_PANEL]
+    data[CONF_ADVANCED_CONFIG][CONF_ENABLE_LIGHT_LAST_BRIGHTNESS] = advanced_input[CONF_ENABLE_LIGHT_LAST_BRIGHTNESS]
+    data[CONF_ADVANCED_CONFIG][CONF_USE_GROUP_CHANNEL_FOR_COVER_STATE] = advanced_input[
+        CONF_USE_GROUP_CHANNEL_FOR_COVER_STATE
+    ]
+    data[CONF_ADVANCED_CONFIG][CONF_OPTIONAL_SETTINGS] = advanced_input[CONF_OPTIONAL_SETTINGS]
+    data[CONF_ADVANCED_CONFIG][CONF_COMMAND_RETRY_MAX_ATTEMPTS] = advanced_input.get(
+        CONF_COMMAND_RETRY_MAX_ATTEMPTS, DEFAULT_COMMAND_RETRY_MAX_ATTEMPTS
+    )
+    data[CONF_ADVANCED_CONFIG][CONF_COMMAND_THROTTLE_INTERVAL] = advanced_input[CONF_COMMAND_THROTTLE_INTERVAL]
+
+    if advanced_input.get(CONF_UN_IGNORES):
+        data[CONF_ADVANCED_CONFIG][CONF_UN_IGNORES] = advanced_input[CONF_UN_IGNORES]
+
+
+def _update_advanced_settings_input(data: ConfigType, advanced_input: ConfigType) -> None:
+    """Update data with advanced settings input (preserves program/sysvar settings)."""
+    if not advanced_input:
+        return
+
+    # Update callback settings (moved here from connection step)
+    if callback_host := advanced_input.get(CONF_CALLBACK_HOST):
+        data[CONF_CALLBACK_HOST] = callback_host
+    elif CONF_CALLBACK_HOST in data:
+        del data[CONF_CALLBACK_HOST]
+
+    if callback_port := advanced_input.get(CONF_CALLBACK_PORT_XML_RPC):
+        data[CONF_CALLBACK_PORT_XML_RPC] = callback_port
+    elif CONF_CALLBACK_PORT_XML_RPC in data:
+        del data[CONF_CALLBACK_PORT_XML_RPC]
+
+    # Preserve existing program/sysvar settings (configured separately in programs_sysvars step)
+    existing_config = data.get(CONF_ADVANCED_CONFIG, {})
+    data[CONF_ADVANCED_CONFIG] = {
+        CONF_PROGRAM_MARKERS: existing_config.get(CONF_PROGRAM_MARKERS, DEFAULT_PROGRAM_MARKERS),
+        CONF_ENABLE_PROGRAM_SCAN: existing_config.get(CONF_ENABLE_PROGRAM_SCAN, DEFAULT_ENABLE_PROGRAM_SCAN),
+        CONF_SYSVAR_MARKERS: existing_config.get(CONF_SYSVAR_MARKERS, DEFAULT_SYSVAR_MARKERS),
+        CONF_ENABLE_SYSVAR_SCAN: existing_config.get(CONF_ENABLE_SYSVAR_SCAN, DEFAULT_ENABLE_SYSVAR_SCAN),
+        CONF_SYS_SCAN_INTERVAL: existing_config.get(CONF_SYS_SCAN_INTERVAL, DEFAULT_SYS_SCAN_INTERVAL),
+    }
+    # Update with new advanced settings input
+    data[CONF_ADVANCED_CONFIG][CONF_ENABLE_SYSTEM_NOTIFICATIONS] = advanced_input[CONF_ENABLE_SYSTEM_NOTIFICATIONS]
+    data[CONF_ADVANCED_CONFIG][CONF_LISTEN_ON_ALL_IP] = advanced_input[CONF_LISTEN_ON_ALL_IP]
+    data[CONF_ADVANCED_CONFIG][CONF_ENABLE_MQTT] = advanced_input[CONF_ENABLE_MQTT]
+    data[CONF_ADVANCED_CONFIG][CONF_MQTT_PREFIX] = advanced_input[CONF_MQTT_PREFIX]
+    data[CONF_ADVANCED_CONFIG][CONF_ENABLE_SUB_DEVICES] = advanced_input[CONF_ENABLE_SUB_DEVICES]
+    data[CONF_ADVANCED_CONFIG][CONF_DISABLE_CONFIG_PANEL] = advanced_input[CONF_DISABLE_CONFIG_PANEL]
+    data[CONF_ADVANCED_CONFIG][CONF_ENABLE_LIGHT_LAST_BRIGHTNESS] = advanced_input[CONF_ENABLE_LIGHT_LAST_BRIGHTNESS]
+    data[CONF_ADVANCED_CONFIG][CONF_USE_GROUP_CHANNEL_FOR_COVER_STATE] = advanced_input[
+        CONF_USE_GROUP_CHANNEL_FOR_COVER_STATE
+    ]
+    data[CONF_ADVANCED_CONFIG][CONF_OPTIONAL_SETTINGS] = advanced_input[CONF_OPTIONAL_SETTINGS]
+    data[CONF_ADVANCED_CONFIG][CONF_COMMAND_RETRY_MAX_ATTEMPTS] = advanced_input.get(
+        CONF_COMMAND_RETRY_MAX_ATTEMPTS, DEFAULT_COMMAND_RETRY_MAX_ATTEMPTS
+    )
+    data[CONF_ADVANCED_CONFIG][CONF_COMMAND_THROTTLE_INTERVAL] = advanced_input[CONF_COMMAND_THROTTLE_INTERVAL]
+    data[CONF_ADVANCED_CONFIG][CONF_BACKUP_PATH] = advanced_input.get(CONF_BACKUP_PATH, DEFAULT_BACKUP_PATH)
+
+    if advanced_input.get(CONF_UN_IGNORES):
+        data[CONF_ADVANCED_CONFIG][CONF_UN_IGNORES] = advanced_input[CONF_UN_IGNORES]
+
+
+def _get_instance_name(friendly_name: Any | None) -> str | None:
+    """Return the instance name from the friendly_name."""
+    if not friendly_name:
+        return None
+    name = str(friendly_name)
+    if name.startswith("OpenCCU - "):
+        return name.replace("OpenCCU - ", "")
+    if name.startswith("OpenCCU "):
+        return name.replace("OpenCCU ", "")
+    return name
+
+
+def _get_serial(model_description: Any | None) -> str | None:
+    """Return the serial from the model_description."""
+    if not model_description:
+        return None
+    model_desc = str(model_description)
+    if len(model_desc) > 10:
+        return model_desc[-10:]
+    return None

@@ -1,0 +1,64 @@
+{
+  "title": "Rademacher HomePilot",
+  "options": {
+    "step": {
+      "init": {
+        "title": "Konfiguration",
+        "description": "",
+        "data": {
+          "exclude": "Ger\u00e4te l\u00f6schen (W\u00e4hle Ger\u00e4te, die du NICHT hinzuf\u00fcgen m\u00f6chtest):",
+          "sensor_type": "Kontaktsensoren mit Schr\u00e4glage ausw\u00e4hlen:",
+          "enable_cyclic_scene_polling": "Aktiviere zyklisches Szenenpolling",
+          "create_scene_activation_entities": "Erzeuge Szenenaktivierungsentit\u00e4ten",
+          "include_non_executable_scenes": "Nicht ausf\u00fchrbare Szenen einschlie\u00dfen",
+          "update_interval": "Aktualisierungsintervall (5\u2013120 s)",
+          "scene_update_interval": "Szenen-Aktualisierungsintervall (10\u2013120 s)",
+          "create_inverted_cover_position": "Sensoren für invertierte Rollladenposition erstellen"
+        }
+      }
+    }
+  },
+  "config": {
+    "step": {
+      "user": {
+        "title": "Hostname/IP-Adresse der Bridge eingeben",
+        "description": "Bitte gib den Hostnamen oder die IP-Adresse der Rademacher Bridge ein (Start2Smart or Homepilot).",
+        "data": {
+          "host": "Hostname/IP-Adresse"
+        }
+      },
+      "user_password": {
+        "title": "Passwort der Bridge eingeben",
+        "description": "Bitte gib das Passwort der Rademacher Bridge ein (Start2Smart or Homepilot).",
+        "data": {
+          "password": "Passwort"
+        }
+      },
+      "config": {
+        "title": "Konfiguration",
+        "description": "",
+        "data": {
+          "exclude": "Ger\u00e4te l\u00f6schen (W\u00e4hle Ger\u00e4te, die du NICHT hinzuf\u00fcgen m\u00f6chtest):",
+          "sensor_type": "Kontaktsensoren mit Schr\u00e4glage ausw\u00e4hlen:",
+          "enable_cyclic_scene_polling": "Zyklische Szenen-Abfrage aktivieren",
+          "create_scene_activation_entities": "Szenen-Aktivierungsentitäten erstellen",
+          "include_non_executable_scenes": "Nicht ausf\u00fchrbare Szenen einschlie\u00dfen",
+          "update_interval": "Aktualisierungsintervall (5\u2013120 s)",
+          "scene_update_interval": "Szenen-Aktualisierungsintervall (10\u2013120 s)",
+          "create_inverted_cover_position": "Sensoren für invertierte Rollladenposition erstellen"
+        }
+      }
+    },
+    "error": {
+      "no_device_selected": "Du musst mindestens ein Ger\u00e4t ausw\u00e4hlen.",
+      "cannot_connect": "Fehler bei Verbindung zur Bridge. Bitte stelle sicher, dass die Bridge im Netzwerk verbunden und Hostname/IP korrekt ist.",
+      "auth_error": "Ung\u00fcltiges Passwort. Bitte stelle sicher, dass das eingegebene Passwort korrekt ist.",
+      "unknown": "Unbekannter Fehler."
+    },
+    "abort": {
+      "no_devices_found": "Es wurden keine Ger\u00e4te gefunden.",
+      "cannot_connect": "Fehler bei Verbindung zur Bridge. Bitte stelle sicher, dass die Bridge im Netzwerk verbunden und Hostname/IP korrekt ist.",
+      "reauth_successful": "Die erneute Authentifizierung war erfolgreich."
+    }
+  }
+}

@@ -1,0 +1,538 @@
+"""PTLS (Protocol TLS) session implementation for Tedee BLE locks.
+
+Implements the 4-stage handshake:
+1. Hello exchange (client hello + server hello)
+2. Server verification
+3. Client verification
+4. Session initialization with application key derivation
+
+The PTLS protocol is a simplified TLS 1.3 variant. Key derivation uses direct
+HMAC-SHA256 rather than the full TLS 1.3 HKDF key schedule:
+  HMAC-SHA256(shared_secret, label || transcript_hash)
+  → first 16 bytes = AES-GCM-128 key
+  → next 12 bytes = AES-GCM-128 IV base
+"""
+
+import asyncio
+import base64
+import hashlib
+import logging
+import os
+import struct
+import time
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.asymmetric import ec
+
+from . import crypto
+from .ble import TedeeBLETransport
+
+logger = logging.getLogger(__name__)
+
+# PTLS message headers (lower nibble only)
+PTLS_HELLO = 0x03
+PTLS_ALERT = 0x04
+PTLS_SERVER_VERIFY = 0x05
+PTLS_CLIENT_VERIFY_I = 0x06
+PTLS_CLIENT_VERIFY_II = 0x07
+PTLS_INITIALIZED = 0x08
+
+# Data headers for encrypted communication
+DATA_NOT_ENCRYPTED = 0x00
+DATA_ENCRYPTED = 0x01
+
+# PTLS version
+PTLS_VERSION = 0x02
+
+# Alert codes
+ALERT_OK = 0x00
+ALERT_GENERIC_ERROR = 0x01
+ALERT_NO_TRUSTED_TIME = 0x02
+ALERT_SESSION_TIMEOUT = 0x03
+ALERT_DISCONNECTED = 0x04
+ALERT_INVALID_CERTIFICATE = 0x05
+ALERT_DEVICE_UNREGISTERED = 0x06
+
+ALERT_NAMES = {
+    0x00: "OK",
+    0x01: "Generic error",
+    0x02: "No trusted time",
+    0x03: "Session timeout (24h)",
+    0x04: "Disconnected",
+    0x05: "Invalid certificate",
+    0x06: "Device unregistered",
+}
+
+
+class PTLSError(Exception):
+    pass
+
+
+class PTLSDuplicateError(PTLSError):
+    """A byte-identical frame was re-delivered by the BLE notification dup-storm.
+
+    Its PTLS counter is already consumed, so it only decrypts against a counter
+    *behind* recv_counter. This is not a desync — callers should discard the
+    frame WITHOUT counting it toward any reconnect threshold.
+    """
+    pass
+
+
+class PTLSAlertError(PTLSError):
+    def __init__(self, code: int):
+        self.code = code
+        super().__init__(f"PTLS Alert: {ALERT_NAMES.get(code, f'Unknown (0x{code:02x})')}")
+
+
+class PTLSSession:
+    """Manages a PTLS secure session with a Tedee lock."""
+
+    def __init__(
+        self,
+        transport: TedeeBLETransport,
+        device_private_key: ec.EllipticCurvePrivateKey,
+        certificate_b64: str,
+        device_public_key_b64: str,
+    ):
+        self.transport = transport
+        self.device_key = device_private_key
+        self.certificate = base64.b64decode(certificate_b64)
+        self.device_pubkey = crypto.base64_to_public_key(device_public_key_b64)
+
+        # Lock to serialize decrypt operations (prevents counter desync)
+        self._crypto_lock = asyncio.Lock()
+        # Counters skipped during out-of-order recovery (capped at 10)
+        self._missed_counters: list[int] = []
+
+        # Handshake state
+        self._transcript = hashlib.sha256()
+        self._shared_secret: bytes | None = None
+
+        # Server-reported MTU for message splitting
+        self._server_mtu: int = 244
+
+        # Saved handshake fields (needed for client verify signature)
+        self._client_random_data: bytes | None = None  # 35 bytes
+        self._client_ecdh_pub: bytes | None = None      # 65 bytes
+        self._encrypted_random: bytes | None = None      # 48 bytes
+        self._session_id_cache: bytes | None = None      # 4 bytes
+        self._server_random_data: bytes | None = None    # 35 bytes
+        self._server_ecdh_pub: bytes | None = None       # 65 bytes
+        self._server_auth_data: bytes | None = None
+        self._server_signature: bytes | None = None
+        self._hello_hash: bytes | None = None
+
+        # Session state
+        self.session_id: bytes | None = None
+        self.send_key: bytes | None = None
+        self.send_iv: bytes | None = None
+        self.recv_key: bytes | None = None
+        self.recv_iv: bytes | None = None
+        self.send_counter: int = 0
+        self.recv_counter: int = 0
+
+    @property
+    def is_established(self) -> bool:
+        return self.session_id is not None
+
+    def _hash_snapshot(self) -> bytes:
+        """Get current transcript hash without consuming state."""
+        return self._transcript.copy().digest()
+
+    def _hash_update(self, data: bytes) -> None:
+        """Update running transcript hash."""
+        self._transcript.update(data)
+
+    async def handshake(self) -> None:
+        """Perform the full PTLS handshake."""
+        logger.info("Starting PTLS handshake...")
+
+        # Phase 1: Hello exchange
+        hello_hash = await self._hello_exchange()
+        logger.info("Hello exchange complete")
+
+        # Phase 2: Server verification
+        await self._server_verify(hello_hash)
+        logger.info("Server verification complete")
+
+        # Phase 3: Client verification
+        await self._client_verify(hello_hash)
+        logger.info("Client verification complete")
+
+        # Phase 4: Wait for session initialized
+        await self._wait_initialized()
+        logger.info("PTLS session established (ID: %s)", self.session_id.hex())
+
+    async def _read_ptls_frame(self, expected: int, timeout: float = 10.0) -> bytes:
+        """Read the next PTLS TX frame with header `expected`, skipping stale ones.
+
+        The lock (or the host BLE stack) sometimes re-delivers a handshake
+        notification many times. Because TX frames are consumed from a FIFO queue,
+        leftover duplicates of an already-handled step can sit ahead of the frame
+        we actually want, so a naive read pops the wrong one (e.g. a repeated server
+        HELLO instead of the SERVER_VERIFY response — header 0x03 vs 0x05). Skip any
+        frame that is neither the expected header nor an alert, bounded by an overall
+        deadline so a relentless duplicate storm still fails instead of hanging.
+        """
+        deadline = time.monotonic() + timeout
+        skipped = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PTLSError(
+                    f"Timed out waiting for PTLS header 0x{expected:02x} "
+                    f"(skipped {skipped} stale frame(s))"
+                )
+            try:
+                response = await self.transport.read_ptls_tx(timeout=remaining)
+            except asyncio.TimeoutError as e:
+                raise PTLSError(
+                    f"Timed out waiting for PTLS header 0x{expected:02x} "
+                    f"(skipped {skipped} stale frame(s))"
+                ) from e
+
+            header = response[0] & 0x0F
+            if header == PTLS_ALERT:
+                raise PTLSAlertError(response[1] if len(response) > 1 else 0xFF)
+            if header == expected:
+                if skipped:
+                    logger.warning(
+                        "Skipped %d stale/duplicate PTLS frame(s) before header 0x%02x",
+                        skipped, expected,
+                    )
+                return response
+
+            skipped += 1
+            logger.debug(
+                "Ignoring unexpected PTLS frame: got 0x%02x, want 0x%02x (skip #%d)",
+                header, expected, skipped,
+            )
+
+    async def _hello_exchange(self) -> bytes:
+        """Exchange hello messages with the lock."""
+        # Generate ephemeral ECDH key pair
+        eph_key = ec.generate_private_key(ec.SECP256R1())
+        eph_pub_bytes = crypto.public_key_to_bytes(eph_key.public_key())
+
+        # Build client hello frame (152 bytes)
+        mtu = min(self.transport.mtu, 255)
+        random_data = os.urandom(32)
+        header_bytes = bytes([PTLS_VERSION, mtu, 0x00])
+        encrypted_random = bytes(48)  # zeros for new session
+        session_id_cache = bytes(4)   # zeros for new session
+
+        client_hello_payload = (
+            header_bytes + random_data + eph_pub_bytes
+            + encrypted_random + session_id_cache
+        )
+        assert len(client_hello_payload) == 152
+
+        # Save fields for client verify signature
+        self._client_random_data = client_hello_payload[0:35]
+        self._client_ecdh_pub = eph_pub_bytes
+        self._encrypted_random = encrypted_random
+        self._session_id_cache = session_id_cache
+
+        # Update transcript hash with client hello payload
+        self._hash_update(client_hello_payload)
+
+        # Send with PTLS_HELLO header
+        await self.transport.write_ptls_rx(bytes([PTLS_HELLO]) + client_hello_payload)
+
+        # Receive server hello (skipping any stale/duplicate frames)
+        response = await self._read_ptls_frame(PTLS_HELLO)
+        server_hello_payload = response[1:]
+        if len(server_hello_payload) < 100:
+            raise PTLSError(
+                f"Server hello too short: {len(server_hello_payload)} bytes"
+            )
+
+        server_version = server_hello_payload[0]
+        server_mtu = server_hello_payload[1]
+        server_ecdh_pub_bytes = server_hello_payload[35:100]
+
+        logger.debug("Server version: 0x%02x, MTU: %d", server_version, server_mtu)
+        self._server_mtu = server_mtu
+
+        # Save server fields for client verify signature
+        self._server_random_data = server_hello_payload[0:35]
+        self._server_ecdh_pub = server_ecdh_pub_bytes
+
+        # Update transcript hash with server hello payload
+        self._hash_update(server_hello_payload)
+        hello_hash = self._hash_snapshot()
+        self._hello_hash = hello_hash
+
+        # Compute ECDH shared secret
+        server_ecdh_pub = crypto.bytes_to_public_key(server_ecdh_pub_bytes)
+        self._shared_secret = crypto.ecdh_shared_secret(eph_key, server_ecdh_pub)
+        logger.debug("ECDH shared secret computed (%d bytes)", len(self._shared_secret))
+
+        return hello_hash
+
+    async def _server_verify(self, hello_hash: bytes) -> None:
+        """Perform server verification."""
+        # Create auth data: current time in milliseconds (8 bytes, big-endian)
+        auth_data = struct.pack(">Q", int(time.time() * 1000))
+
+        # Send server verify challenge
+        await self.transport.write_ptls_rx(bytes([PTLS_SERVER_VERIFY]) + auth_data)
+
+        # Derive server handshake keys
+        srv_key, srv_iv = crypto.derive_keys_from_hmac(
+            self._shared_secret, "ptlss hs traffic", hello_hash
+        )
+
+        # Receive encrypted server verify response (skipping stale/duplicate frames)
+        response = await self._read_ptls_frame(PTLS_SERVER_VERIFY)
+        encrypted_data = response[1:]
+
+        try:
+            decrypted = crypto.aes_gcm_decrypt(srv_key, srv_iv, encrypted_data)
+        except Exception as e:
+            raise PTLSError(f"Server verify decryption failed: {e}") from e
+
+        logger.debug("Server verify decrypted: %d bytes", len(decrypted))
+
+        # Parse decrypted server verify
+        pos = 0
+        recv_auth_data_len = struct.unpack(">H", decrypted[pos:pos + 2])[0]
+        pos += 2
+        recv_auth_data = decrypted[pos:pos + recv_auth_data_len]
+        pos += recv_auth_data_len
+
+        sig_len = struct.unpack(">H", decrypted[pos:pos + 2])[0]
+        pos += 2
+        server_sig = decrypted[pos:pos + sig_len]
+        pos += sig_len
+
+        recv_hello_hash_len = struct.unpack(">H", decrypted[pos:pos + 2])[0]
+        pos += 2
+        recv_hello_hash = decrypted[pos:pos + recv_hello_hash_len]
+
+        # Save server verify fields for client verify signature
+        self._server_auth_data = recv_auth_data
+        self._server_signature = server_sig
+
+        # Verify auth_data matches what we sent
+        if recv_auth_data != auth_data:
+            raise PTLSError("Server verify: auth_data mismatch")
+
+        # Verify hello_hash matches
+        if recv_hello_hash != hello_hash:
+            raise PTLSError("Server verify: hello_hash mismatch")
+
+        # Verify server signature using the device's public key.
+        # The signature is over the transcript hash (prehashed SHA-256 digest)
+        # after updating it with auth_data_len + auth_data.
+        # This authenticates the lock's long-term identity.
+        _transcript_for_sig = self._transcript.copy()
+        _transcript_for_sig.update(
+            struct.pack(">H", len(recv_auth_data)) + recv_auth_data
+        )
+        sig_digest = _transcript_for_sig.digest()
+
+        if not crypto.ecdsa_verify_prehashed(
+            self.device_pubkey, server_sig, sig_digest
+        ):
+            raise PTLSError(
+                "Server signature verification failed — lock identity not confirmed"
+            )
+
+        # Update transcript hash with decrypted server verify content
+        self._hash_update(decrypted)
+        logger.debug("Server verification passed")
+
+    async def _client_verify(self, hello_hash: bytes) -> None:
+        """Send client verification with certificate and signature."""
+        hello_verify_hash = self._hash_snapshot()
+
+        # Build signature data
+        sign_data = (
+            self._client_random_data
+            + self._client_ecdh_pub
+            + self._encrypted_random
+            + self._session_id_cache
+            + self._server_random_data
+            + self._server_ecdh_pub
+            + struct.pack(">H", len(self._server_auth_data)) + self._server_auth_data
+            + struct.pack(">H", len(self._server_signature)) + self._server_signature
+            + struct.pack(">H", len(hello_hash)) + hello_hash
+            + struct.pack(">H", len(self.certificate)) + self.certificate
+        )
+
+        signature = crypto.ecdsa_sign(self.device_key, sign_data)
+
+        # Build payload
+        payload = (
+            struct.pack(">H", len(self.certificate)) + self.certificate
+            + struct.pack(">H", len(signature)) + signature
+            + struct.pack(">H", len(hello_verify_hash)) + hello_verify_hash
+        )
+
+        # Update transcript hash with the payload BEFORE encryption
+        self._hash_update(payload)
+
+        # Derive client handshake keys
+        cli_key, cli_iv = crypto.derive_keys_from_hmac(
+            self._shared_secret, "ptlsc hs traffic", hello_hash
+        )
+
+        # Encrypt with AES-GCM
+        encrypted = crypto.aes_gcm_encrypt(cli_key, cli_iv, payload)
+
+        # Split based on lock's reported MTU
+        mtu = self._server_mtu - 1
+
+        if len(encrypted) <= mtu:
+            await self.transport.write_ptls_rx(
+                bytes([PTLS_CLIENT_VERIFY_I]) + encrypted
+            )
+            await self.transport.write_ptls_rx(bytes([PTLS_CLIENT_VERIFY_II]))
+        else:
+            part1 = bytes([PTLS_CLIENT_VERIFY_I]) + encrypted[:mtu]
+            part2 = bytes([PTLS_CLIENT_VERIFY_II]) + encrypted[mtu:]
+            await self.transport.write_ptls_rx(part1)
+            await self.transport.write_ptls_rx(part2)
+
+        logger.debug("Client verification sent (%d bytes encrypted)", len(encrypted))
+
+    async def _wait_initialized(self) -> None:
+        """Wait for PTLS_INITIALIZED response and derive application keys."""
+        response = await self._read_ptls_frame(PTLS_INITIALIZED)
+
+        # Extract 4-byte session ID
+        self.session_id = response[1:5]
+
+        # Derive application encryption keys
+        finished_hash = self._hash_snapshot()
+
+        self.send_key, self.send_iv = crypto.derive_keys_from_hmac(
+            self._shared_secret, "ptlsc ap traffic", finished_hash
+        )
+        self.recv_key, self.recv_iv = crypto.derive_keys_from_hmac(
+            self._shared_secret, "ptlss ap traffic", finished_hash
+        )
+
+        self.send_counter = 0
+        self.recv_counter = 0
+
+    def encrypt(self, plaintext: bytes) -> bytes:
+        """Encrypt a message for sending to the lock."""
+        if not self.is_established:
+            raise PTLSError("Session not established")
+
+        nonce = crypto.make_nonce(self.send_iv, self.send_counter)
+        ciphertext = crypto.aes_gcm_encrypt(self.send_key, nonce, plaintext)
+        logger.debug(
+            "Encrypt: counter=%d, plaintext_len=%d, ciphertext_len=%d",
+            self.send_counter, len(plaintext), len(ciphertext),
+        )
+        self.send_counter += 1
+
+        return bytes([DATA_ENCRYPTED]) + ciphertext
+
+    async def async_decrypt(self, data: bytes) -> bytes:
+        """Decrypt a message from the lock (async, serialized).
+
+        Uses a lock to ensure recv_counter stays in sync when notifications
+        and command responses arrive concurrently.
+        """
+        async with self._crypto_lock:
+            return self._decrypt_inner(data)
+
+    def _decrypt_inner(self, data: bytes) -> bytes:
+        """Inner decrypt logic (must be called under _crypto_lock).
+
+        Handles out-of-order message delivery (common with BT proxies) by
+        trying missed counters from previous recoveries, then the current
+        counter, then skip-ahead up to 5 positions.
+        """
+        if not self.is_established:
+            raise PTLSError("Session not established")
+
+        header = data[0] & 0x0F
+        if header == PTLS_ALERT:
+            raise PTLSAlertError(data[1] if len(data) > 1 else 0xFF)
+        if header == DATA_NOT_ENCRYPTED:
+            return data[1:]
+        if header != DATA_ENCRYPTED:
+            raise PTLSError(f"Unexpected header: 0x{header:02x}")
+
+        encrypted_data = data[1:]
+
+        # 1) Try previously missed counters (from earlier out-of-order recoveries)
+        for missed in list(self._missed_counters):
+            nonce = crypto.make_nonce(self.recv_iv, missed)
+            try:
+                plaintext = crypto.aes_gcm_decrypt(self.recv_key, nonce, encrypted_data)
+                self._missed_counters.remove(missed)
+                logger.warning(
+                    "Counter desync recovered: used missed counter %d "
+                    "(current=%d, missed_remaining=%s)",
+                    missed, self.recv_counter, self._missed_counters,
+                )
+                return plaintext
+            except InvalidTag:
+                continue
+
+        # 2) Try current counter (normal happy path)
+        nonce = crypto.make_nonce(self.recv_iv, self.recv_counter)
+        logger.debug(
+            "Decrypt: counter=%d, encrypted_len=%d, header=0x%02x",
+            self.recv_counter, len(encrypted_data), data[0],
+        )
+        try:
+            plaintext = crypto.aes_gcm_decrypt(self.recv_key, nonce, encrypted_data)
+            self.recv_counter += 1
+            return plaintext
+        except InvalidTag:
+            pass
+
+        # 3) Skip-ahead: try counter+1 through counter+5
+        for offset in range(1, 6):
+            skip_counter = self.recv_counter + offset
+            nonce = crypto.make_nonce(self.recv_iv, skip_counter)
+            try:
+                plaintext = crypto.aes_gcm_decrypt(self.recv_key, nonce, encrypted_data)
+                # Record skipped counters as missed
+                for skipped in range(self.recv_counter, skip_counter):
+                    if skipped not in self._missed_counters:
+                        self._missed_counters.append(skipped)
+                # Cap missed list to prevent unbounded growth
+                self._missed_counters = self._missed_counters[-10:]
+                logger.warning(
+                    "Counter desync recovered: skipped ahead to counter %d "
+                    "(expected=%d, missed=%s)",
+                    skip_counter, self.recv_counter, self._missed_counters,
+                )
+                self.recv_counter = skip_counter + 1
+                return plaintext
+            except InvalidTag:
+                continue
+
+        # 4) Backward window: the lock's BLE stack re-delivers each notification
+        # up to ~5x. A duplicate of an already-consumed frame carries a counter
+        # *behind* recv_counter, so the forward searches above never match it.
+        # Recognise it as a duplicate and drop it WITHOUT advancing recv_counter,
+        # so a real event arriving right after a lock action can't wedge the
+        # receive channel. Skip counters still in _missed_counters — those were
+        # never consumed and are handled as legitimate late delivery in step 1.
+        for old_counter in range(self.recv_counter - 1, max(-1, self.recv_counter - 9), -1):
+            if old_counter in self._missed_counters:
+                continue
+            nonce = crypto.make_nonce(self.recv_iv, old_counter)
+            try:
+                crypto.aes_gcm_decrypt(self.recv_key, nonce, encrypted_data)
+            except InvalidTag:
+                continue
+            raise PTLSDuplicateError(
+                f"Duplicate frame re-delivered at counter {old_counter} "
+                f"(recv_counter={self.recv_counter})"
+            )
+
+        # 5) All attempts exhausted
+        raise PTLSError(
+            f"Decrypt failed: counter desync unrecoverable "
+            f"(counter={self.recv_counter}, missed={self._missed_counters})"
+        )

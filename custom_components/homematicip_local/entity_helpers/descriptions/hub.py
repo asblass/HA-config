@@ -1,0 +1,350 @@
+"""Hub-specific entity description rules."""
+
+from __future__ import annotations
+
+from aiohomematic.const import (
+    CONNECTIVITY_SENSOR_PREFIX,
+    INBOX_SENSOR_NAME,
+    METRICS_SENSOR_CONNECTION_LATENCY_NAME,
+    METRICS_SENSOR_LAST_EVENT_AGE_NAME,
+    METRICS_SENSOR_SYSTEM_HEALTH_NAME,
+    DataPointCategory,
+)
+from custom_components.homematicip_local.entity_helpers.base import (
+    HmBinarySensorEntityDescription,
+    HmButtonEntityDescription,
+    HmSensorEntityDescription,
+)
+from custom_components.homematicip_local.entity_helpers.factories import diagnostic_sensor
+from custom_components.homematicip_local.entity_helpers.registry import EntityDescriptionRule
+from homeassistant.components.binary_sensor import BinarySensorDeviceClass
+from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
+from homeassistant.const import UnitOfEnergy, UnitOfLength, UnitOfRatio, UnitOfTime
+
+HUB_RULES: list[EntityDescriptionRule] = [
+    # Hub buttons
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_BUTTON,
+        var_name_contains="INSTALL_MODE_HMIP_BUTTON",
+        description=HmButtonEntityDescription(
+            key="INSTALL_MODE_HMIP_BUTTON",
+            translation_key="install_mode_hmip_button",
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_BUTTON,
+        var_name_contains="INSTALL_MODE_BIDCOS_BUTTON",
+        description=HmButtonEntityDescription(
+            key="INSTALL_MODE_BIDCOS_BUTTON",
+            translation_key="install_mode_bidcos_button",
+        ),
+    ),
+    # Hub sensors - System messages
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains="ALARM_MESSAGES",
+        description=HmSensorEntityDescription(
+            key="ALARM_MESSAGES",
+            state_class=SensorStateClass.MEASUREMENT,
+            translation_key="alarm_messages",
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains="SERVICE_MESSAGES",
+        description=HmSensorEntityDescription(
+            key="SERVICE_MESSAGES",
+            state_class=SensorStateClass.MEASUREMENT,
+            translation_key="service_messages",
+        ),
+    ),
+    # Hub sensors - Install mode
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains="INSTALL_MODE_HMIP",
+        description=HmSensorEntityDescription(
+            key="INSTALL_MODE_HMIP",
+            translation_key="install_mode_hmip",
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains="INSTALL_MODE_BIDCOS",
+        description=HmSensorEntityDescription(
+            key="INSTALL_MODE_BIDCOS",
+            translation_key="install_mode_bidcos",
+        ),
+    ),
+    # Hub sensors - Inbox
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains=INBOX_SENSOR_NAME,
+        description=HmSensorEntityDescription(
+            key="INBOX",
+            translation_key="inbox",
+        ),
+    ),
+    # Hub binary sensors - Interface connectivity
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_BINARY_SENSOR,
+        var_name_contains=CONNECTIVITY_SENSOR_PREFIX,
+        description=HmBinarySensorEntityDescription(
+            key="CONNECTIVITY_SENSOR",
+            device_class=BinarySensorDeviceClass.CONNECTIVITY,
+        ),
+    ),
+    # Hub binary sensor - daemon reachability (openccu-loom backend only).
+    #
+    # It answers the same question as the per-interface connectivity
+    # sensors one layer up — is the thing we talk to there — so it carries
+    # the same device class. Without it the entity renders as a bare
+    # on/off, and Home Assistant cannot tell that "off" is the bad state.
+    #
+    # It needs its own rule because the connectivity rule above matches on
+    # the "Connectivity" name prefix, and this singleton is named
+    # "daemon_connection": "connectivity" is not a substring of
+    # "daemon_connection", so it was falling through to no description at
+    # all.
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_BINARY_SENSOR,
+        var_name_contains="daemon_connection",
+        description=HmBinarySensorEntityDescription(
+            key="DAEMON_CONNECTION",
+            device_class=BinarySensorDeviceClass.CONNECTIVITY,
+        ),
+    ),
+    # Hub binary sensors - Security & Safety hazard classes (openccu-loom
+    # backend). One sensor per class the daemon folds its sources into.
+    #
+    # Each carries the device class Home Assistant already knows for that
+    # hazard, so the entity gets the right icon, the right on/off wording
+    # and the semantics voice assistants and automation blueprints match
+    # on. Without one they are bare on/off toggles, and "on" — which here
+    # means a detector has fired — reads as the good state.
+    #
+    # Two have no exact counterpart: HA knows neither "intrusion" nor
+    # "panic". SAFETY is the closest — it renders as Safe/Unsafe, which is
+    # the right polarity for both — and is chosen over leaving them blank
+    # because a wrong-but-close icon still beats no state semantics at all.
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_BINARY_SENSOR,
+        var_name_contains="security_smoke",
+        description=HmBinarySensorEntityDescription(
+            key="SECURITY_SMOKE",
+            device_class=BinarySensorDeviceClass.SMOKE,
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_BINARY_SENSOR,
+        var_name_contains="security_water",
+        description=HmBinarySensorEntityDescription(
+            key="SECURITY_WATER",
+            device_class=BinarySensorDeviceClass.MOISTURE,
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_BINARY_SENSOR,
+        var_name_contains="security_gas",
+        description=HmBinarySensorEntityDescription(
+            key="SECURITY_GAS",
+            device_class=BinarySensorDeviceClass.GAS,
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_BINARY_SENSOR,
+        var_name_contains="security_co",
+        description=HmBinarySensorEntityDescription(
+            key="SECURITY_CO",
+            device_class=BinarySensorDeviceClass.CO,
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_BINARY_SENSOR,
+        var_name_contains="security_tamper",
+        description=HmBinarySensorEntityDescription(
+            key="SECURITY_TAMPER",
+            device_class=BinarySensorDeviceClass.TAMPER,
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_BINARY_SENSOR,
+        var_name_contains="security_battery",
+        description=HmBinarySensorEntityDescription(
+            key="SECURITY_BATTERY",
+            device_class=BinarySensorDeviceClass.BATTERY,
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_BINARY_SENSOR,
+        var_name_contains="security_technical",
+        description=HmBinarySensorEntityDescription(
+            key="SECURITY_TECHNICAL",
+            device_class=BinarySensorDeviceClass.PROBLEM,
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_BINARY_SENSOR,
+        var_name_contains="security_intrusion",
+        description=HmBinarySensorEntityDescription(
+            key="SECURITY_INTRUSION",
+            device_class=BinarySensorDeviceClass.SAFETY,
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_BINARY_SENSOR,
+        var_name_contains="security_panic",
+        description=HmBinarySensorEntityDescription(
+            key="SECURITY_PANIC",
+            device_class=BinarySensorDeviceClass.SAFETY,
+        ),
+    ),
+    # Hub sensors - Energy counter (system variables)
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains="svEnergyCounter",
+        description=HmSensorEntityDescription(
+            key="ENERGY_COUNTER",
+            device_class=SensorDeviceClass.ENERGY,
+            native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
+            state_class=SensorStateClass.TOTAL_INCREASING,
+            translation_key="energy_counter_total",
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains="svEnergyCounterFeedIn",
+        description=HmSensorEntityDescription(
+            key="ENERGY_COUNTER_FEED_IN",
+            device_class=SensorDeviceClass.ENERGY,
+            native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
+            state_class=SensorStateClass.TOTAL_INCREASING,
+            translation_key="energy_counter_feed_in_total",
+        ),
+    ),
+    # Hub sensors - Rain counter (system variables)
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains="svHmIPRainCounter",
+        description=HmSensorEntityDescription(
+            key="RAIN_COUNTER",
+            native_unit_of_measurement=UnitOfLength.MILLIMETERS,
+            state_class=SensorStateClass.TOTAL_INCREASING,
+            translation_key="rain_counter_total",
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains="svHmIPRainCounterToday",
+        description=HmSensorEntityDescription(
+            key="RAIN_COUNTER_TODAY",
+            native_unit_of_measurement=UnitOfLength.MILLIMETERS,
+            state_class=SensorStateClass.TOTAL_INCREASING,
+            translation_key="rain_counter_today",
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains="svHmIPRainCounterYesterday",
+        description=HmSensorEntityDescription(
+            key="RAIN_COUNTER_YESTERDAY",
+            native_unit_of_measurement=UnitOfLength.MILLIMETERS,
+            state_class=SensorStateClass.TOTAL_INCREASING,
+            translation_key="rain_counter_yesterday",
+        ),
+    ),
+    # Hub sensors - Sunshine counter (system variables)
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains="svHmIPSunshineCounter",
+        description=HmSensorEntityDescription(
+            key="SUNSHINE_COUNTER",
+            device_class=SensorDeviceClass.DURATION,
+            native_unit_of_measurement=UnitOfTime.MINUTES,
+            state_class=SensorStateClass.TOTAL_INCREASING,
+            translation_key="sunshine_counter_total",
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains="svHmIPSunshineCounterToday",
+        description=HmSensorEntityDescription(
+            key="SUNSHINE_COUNTER_TODAY",
+            device_class=SensorDeviceClass.DURATION,
+            native_unit_of_measurement=UnitOfTime.MINUTES,
+            state_class=SensorStateClass.TOTAL_INCREASING,
+            translation_key="sunshine_counter_today",
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains="svHmIPSunshineCounterYesterday",
+        description=HmSensorEntityDescription(
+            key="SUNSHINE_COUNTER_YESTERDAY",
+            device_class=SensorDeviceClass.DURATION,
+            native_unit_of_measurement=UnitOfTime.MINUTES,
+            state_class=SensorStateClass.TOTAL_INCREASING,
+            translation_key="sunshine_counter_yesterday",
+        ),
+    ),
+    # Hub sensors - Metrics (diagnostics)
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains=METRICS_SENSOR_SYSTEM_HEALTH_NAME,
+        description=diagnostic_sensor(
+            key="SYSTEM_HEALTH",
+            unit=UnitOfRatio.PERCENTAGE,
+            icon="mdi:heart-pulse",
+            translation_key="system_health",
+            enabled_default=True,
+            suggested_display_precision=1,
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains=METRICS_SENSOR_CONNECTION_LATENCY_NAME,
+        description=diagnostic_sensor(
+            key="CONNECTION_LATENCY",
+            device_class=SensorDeviceClass.DURATION,
+            unit=UnitOfTime.MILLISECONDS,
+            icon="mdi:timer-outline",
+            translation_key="connection_latency",
+            enabled_default=True,
+            suggested_display_precision=1,
+        ),
+    ),
+    # Round-trip latency to the daemon itself (openccu-loom backend only).
+    #
+    # Deliberately separate from the connection-latency rule above, which
+    # measures the daemon-to-CCU leg. The two have unrelated causes — a slow
+    # reverse proxy or a congested link between here and the daemon is
+    # invisible in the CCU figure, and a struggling CCU is invisible in this
+    # one — so they are two sensors rather than one, and each needs its own
+    # description. Matched on a literal because the singleton is loom-specific
+    # and aiohomematic has no constant for it.
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains="daemon_latency",
+        description=diagnostic_sensor(
+            key="DAEMON_LATENCY",
+            device_class=SensorDeviceClass.DURATION,
+            unit=UnitOfTime.MILLISECONDS,
+            icon="mdi:lan-connect",
+            translation_key="daemon_latency",
+            enabled_default=True,
+            suggested_display_precision=1,
+        ),
+    ),
+    EntityDescriptionRule(
+        category=DataPointCategory.HUB_SENSOR,
+        var_name_contains=METRICS_SENSOR_LAST_EVENT_AGE_NAME,
+        description=diagnostic_sensor(
+            key="LAST_EVENT_AGE",
+            device_class=SensorDeviceClass.DURATION,
+            unit=UnitOfTime.SECONDS,
+            icon="mdi:clock-alert-outline",
+            translation_key="last_event_age",
+            enabled_default=True,
+            suggested_display_precision=1,
+        ),
+    ),
+]

@@ -1,0 +1,102 @@
+{
+    "config": {
+        "flow_title": "{name}",
+        "step": {
+            "user": {
+                "title": "Tedee Cloud API",
+                "description": "Introdu cheia ta personala de acces Tedee. O poti crea pe [portalul Tedee]({tedee_portal_url}) la sectiunea Personal Access Keys.",
+                "data": {
+                    "api_key": "Cheie de acces personala"
+                }
+            },
+            "bluetooth_confirm": {
+                "title": "Incuietoare Tedee gasita",
+                "description": "Am gasit **{name}** in apropiere. Introdu cheia ta personala de acces Tedee pentru a finaliza configurarea. O poti crea pe [portalul Tedee]({tedee_portal_url}) la sectiunea Personal Access Keys.",
+                "data": {
+                    "api_key": "Cheie de acces personala"
+                }
+            },
+            "select_lock": {
+                "title": "Selecteaza incuietoarea",
+                "description": "Alege incuietoarea pe care vrei sa o adaugi.",
+                "data": {
+                    "lock_selection": "Incuietoare"
+                }
+            },
+            "ble_address": {
+                "title": "Adresa BLE",
+                "description": "Scanarea automata nu a gasit incuietoarea {serial}. Asigura-te ca incuietoarea este aproape si activa (atinge-o), apoi introdu adresa MAC manual. O poti gasi in aplicatia Tedee la setarile incuietorii.",
+                "data": {
+                    "address": "Adresa MAC"
+                }
+            },
+            "register": {
+                "title": "Inregistrare",
+                "description": "Se genereaza cheile si se inregistreaza cu Tedee cloud..."
+            },
+            "reauth_confirm": {
+                "title": "Re-autentificare Tedee",
+                "description": "Cheia de acces personala pentru **{name}** nu mai functioneaza — este posibil sa fi fost revocata sau sa nu aiba permisiunile necesare. Introdu o cheie noua de pe [portalul Tedee]({tedee_portal_url}).",
+                "data": {
+                    "api_key": "Cheie de acces personala"
+                }
+            }
+        },
+        "error": {
+            "invalid_api_key": "Cheie API invalida. Verifica cheia de acces personala.",
+            "cannot_connect": "Nu s-a putut conecta la Tedee Cloud API.",
+            "no_locks_found": "Nu s-au gasit incuietori in contul tau Tedee.",
+            "invalid_mac": "Adresa MAC invalida. Foloseste formatul XX:XX:XX:XX:XX:XX.",
+            "scan_failed": "Scanarea Bluetooth nu a gasit incuietoarea. Asigura-te ca este aproape si activa. Introdu adresa manual mai jos.",
+            "lock_not_on_account": "Cheia functioneaza, dar aceasta incuietoare nu este in contul ei. Foloseste o cheie din contul care detine incuietoarea.",
+            "registration_failed": "Inregistrarea cu Tedee cloud a esuat."
+        },
+        "abort": {
+            "all_locks_configured": "Toate incuietorile din acest cont sunt deja configurate.",
+            "already_configured": "Aceasta incuietoare este deja configurata.",
+            "not_supported": "Acest dispozitiv Tedee nu este o incuietoare suportata.",
+            "insufficient_scopes": "Cheia de acces personala nu are permisiunile necesare. In portalul Tedee, editeaza cheia si activeaza permisiunile complete pentru dispozitive si certificate, apoi adauga integrarea din nou.",
+            "reauth_successful": "Re-autentificarea a reusit.",
+            "registration_failed": "Inregistrarea cu Tedee cloud a esuat. Verifica jurnalele pentru detalii."
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Optiuni Tedee",
+                "data": {
+                    "auto_pull": "Trage arcul la deblocare"
+                },
+                "data_description": {
+                    "auto_pull": "Cand este activat (implicit), deblocarea trage si arcul pentru a deschide usa. Dezactiveaza pentru a debloca fara tragere."
+                }
+            }
+        }
+    },
+    "entity": {
+        "lock": {
+            "lock": {
+                "name": "Incuietoare"
+            }
+        },
+        "binary_sensor": {
+            "door": {
+                "name": "Usa"
+            },
+            "battery_charging": {
+                "name": "Incarcare baterie"
+            },
+            "firmware_update": {
+                "name": "Actualizare firmware"
+            }
+        },
+        "sensor": {
+            "battery": {
+                "name": "Baterie"
+            },
+            "door_sensor_battery": {
+                "name": "Baterie senzor usa"
+            }
+        }
+    }
+}

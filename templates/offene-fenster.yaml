@@ -1,0 +1,24 @@
+- sensor:
+    - name: "Offene Fenster und Türen"
+      unique_id: offene_fenster_und_tueren
+      icon: mdi:window-open-variant
+      state: >
+        {{
+          [
+            states('binary_sensor.erdgeschoss_abstellraum_fenster_abstellraum_kontakt'),
+            states('binary_sensor.erdgeschoss_wc_fenster_wc_fenster_kontakt'),
+            states('binary_sensor.keller_waschkuche_fenster_kontakt'),
+            states('binary_sensor.obergeschoss_andreas_fenster_kontakt'),
+            states('binary_sensor.obergeschoss_badezimmer_fenster_badezimmer_kontakt'),
+            states('binary_sensor.obergeschoss_claudia_fenster_kontakt'),
+            states('binary_sensor.obergeschoss_schlafzimmer_fenster_schlafzimmer_kontakt'),
+            states('binary_sensor.keller_garage_tor_kontakt'),
+            states('binary_sensor.erdgeschoss_haustuer_kontakt'),
+            states('binary_sensor.erdgeschoss_kuechenterrasse_tuer_kuechenterrasse_kontakt'),
+            states('binary_sensor.erdgeschoss_wintergarten_tuer_wintergarten_kontakt'),
+            states('binary_sensor.erdgeschoss_wohnzimmerterrasse_tuer_wohnzimmerterrasse_kontakt')
+          ]
+          | select('eq', 'on')
+          | list
+          | count
+        }}

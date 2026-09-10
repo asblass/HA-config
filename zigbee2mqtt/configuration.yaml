@@ -1,0 +1,106 @@
+version: 5
+mqtt:
+  base_topic: zigbee2mqtt
+  server: mqtt://core-mosquitto:1883
+  user: addons
+  password: uquoo1ahT8euteeb8eish7Oog1cuof6fe0saipaR1ohh2kaike3oech9obo1choh
+  version: 5
+serial:
+  adapter: ember
+  port: tcp://192.168.3.181:6638
+advanced:
+  log_level: info
+  channel: 25
+  network_key:
+    - 193
+    - 170
+    - 51
+    - 205
+    - 78
+    - 149
+    - 140
+    - 36
+    - 234
+    - 252
+    - 108
+    - 29
+    - 24
+    - 170
+    - 30
+    - 71
+  pan_id: 63456
+  ext_pan_id:
+    - 165
+    - 173
+    - 108
+    - 69
+    - 187
+    - 147
+    - 167
+    - 219
+  enable_external_js: false
+  last_seen: ISO_8601_local
+frontend:
+  enabled: true
+  port: 8099
+homeassistant:
+  enabled: true
+  experimental_event_entities: true
+availability:
+  enabled: true
+devices:
+  '0x00158d00046592ae':
+    friendly_name: ThermoDachboden
+    description: Thermo-/Hygrometer Dachboden
+  '0x00158d000465976a':
+    friendly_name: TasterLuefter
+    description: Taster für Lüfter Druckerraum
+  '0x54ef4410002c8a25':
+    friendly_name: SteckdoseTrockner
+    description: Steckdose am Wäschetrockner
+  '0x54ef4410002c973e':
+    friendly_name: SteckdoseRepeater
+    description: Zigbee Steckdose als Repeater
+  '0x00158d000753bf0f':
+    friendly_name: ThermoWaschkueche
+    description: Aqara Thermo-/Hygrometer Waschküche
+  '0x00158d0007d3e8a8':
+    friendly_name: ThermoGarage
+    description: Aqara Thermo-/Hygrometer in Garage
+  '0x00158d000444600c':
+    friendly_name: ThermoSchlafzimmer
+    description: Aqara Thermo-/Hygrometer Schlafzimmer
+  '0x00158d000423ebc2':
+    friendly_name: ThermoClaudia
+    description: Aqara Thermo-/Hygrometer Claudia
+  '0x00158d000320ad93':
+    friendly_name: ThermoBadezimmer
+    description: Aqara Thermo-/Hygrometer Badezimmer
+  '0x00158d00045ad086':
+    friendly_name: ThermoAbstellraum
+    description: Aqara Thermo-/Hygrometer Abstellraum
+  '0x00158d00048894f0':
+    friendly_name: ThermoWC
+    description: Aqara Thermo-/Hygrometer Gäste WC
+  '0xa4c138083786ffff':
+    friendly_name: TrocknerGarage
+    description: Sonoff Zigbee Steckdose Nr. 1 am Wäschetrockner Garage
+  '0xa4c138084778ffff':
+    friendly_name: SonoffSteckdose2
+    description: Sonoff Zigbee Steckdose 2
+  '0x00158d0007e57c15':
+    friendly_name: ThermoHausanschluss
+    description: Aqara Thermo-/Hygrometer Hausanschlussraum
+  '0x00158d0007e56e04':
+    friendly_name: ThermoDruckerraum
+    description: Aqara Thermo-/Hygrometer im 3D Druckerraum
+  '0x00158d00044f07a5':
+    friendly_name: ThermoKueche
+  '0x00158d00044f7ea7':
+    friendly_name: ThermoWintergarten
+    description: Aqara Thermo-/Hygrometer Wintergarten
+  '0x00158d000af1ca88':
+    friendly_name: ThermoHeizung
+    description: Aqara Thermo-/Hygrometer Heizungsraum
+  '0x84182600000a917f':
+    friendly_name: Osram SmartPlug

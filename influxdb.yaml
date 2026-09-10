@@ -1,0 +1,316 @@
+# Messwerte, die nach influx.l2u.eu geschrieben werden sollen.
+
+include:
+  entities:
+
+    ######################################################################
+    # ENERGIE / VERBRAUCHER
+    ######################################################################
+
+    # Kühlgeräte
+    - sensor.nous2_bosch_gefrierschrank_energy_power              # Leistung Bosch Gefrierschrank
+    - sensor.nous_6_lg_kuhlschrank_energy_power                   # Leistung LG Kühl-/Gefrierkombination
+    - sensor.nous3_kuhlschrank_garage_energy_power                # Leistung Kühlschrank Garage
+
+    # Trockner / Pumpe
+    - sensor.trocknergarage_energy                                # Leistung Trockner Garage
+    - sensor.regenwasserpumpe_leistung                            # Leistung Regenwasserpumpe
+
+
+    ######################################################################
+    # DACHBODEN
+    ######################################################################
+
+    # Entfeuchter / Ventilator
+    - sensor.gosund_1_entfeuchter_dach_energy_power               # Leistung Entfeuchter
+    - switch.gosund_1_entfeuchter_dach_gosund_1                   # Schaltzustand Entfeuchter
+    - sensor.gosund_3_ventilator_dachboden_energy_power           # Leistung Ventilator
+    - switch.gosund_3_ventilator_dachboden_gosund_3               # Schaltzustand Ventilator
+
+    # ThermoDachboden Aqara
+    - sensor.thermodachboden_temperature                          # Temperatur
+    - sensor.thermodachboden_humidity                             # Luftfeuchte
+    - sensor.thermodachboden_pressure                             # Luftdruck
+    - sensor.thermodachboden_battery                              # Batterie
+    - sensor.taupunkt_dachboden                                   # Taupunkt
+
+    ######################################################################
+    # Wintergarten
+    ######################################################################
+    
+    - sensor.thermowintergarten_temperature
+    - sensor.thermowintergarten_humidity
+    - sensor.thermowintergarten_pressure
+    - sensor.thermowintergarten_battery
+    
+    ######################################################################
+    # Heizungsraum
+    ######################################################################
+    
+    - sensor.thermoheizung_temperature
+    - sensor.thermoheizung_humidity
+    - sensor.thermoheizung_pressure
+    - sensor.thermoheizung_battery    
+    
+
+    ######################################################################
+    # Druckerraum
+    ######################################################################
+
+    # ThermoHausanschluss Aqara
+    - sensor.thermodruckerraum_temperature                      # Temperatur
+    - sensor.thermodruckerraum_humidity                         # Luftfeuchte
+    - sensor.thermodruckerraum_pressure                         # Luftdruck
+    - sensor.thermodruckerraum_battery                          # Batterie
+
+    ######################################################################
+    # Küche
+    ######################################################################
+
+    # ThermoKueche Aqara
+    - sensor.thermokueche_temperature                      # Temperatur
+    - sensor.thermokueche_humidity                         # Luftfeuchte
+    - sensor.thermokueche_pressure                         # Luftdruck
+    - sensor.thermokueche_battery                          # Batterie
+
+    ######################################################################
+    # HAUSANSCHLUSSRAUM
+    ######################################################################
+
+    # ThermoHausanschluss Aqara
+    - sensor.thermohausanschluss_temperature                      # Temperatur
+    - sensor.thermohausanschluss_humidity                         # Luftfeuchte
+    - sensor.thermohausanschluss_pressure                         # Luftdruck
+    - sensor.thermohausanschluss_battery                          # Batterie
+
+
+    ######################################################################
+    # CLAUDIA
+    ######################################################################
+
+    # ThermoClaudia Aqara
+    - sensor.thermoclaudia_temperature                            # Temperatur
+    - sensor.thermoclaudia_humidity                               # Luftfeuchte
+    - sensor.thermoclaudia_pressure                               # Luftdruck
+    - sensor.thermoclaudia_battery                                # Batterie
+
+    # Netatmo Claudia
+    - sensor.claudia_netatmo_claudia_temperatur
+    - sensor.claudia_netatmo_claudia_luftfeuchtigkeit
+    - sensor.claudia_netatmo_claudia_kohlendioxid
+    - sensor.claudia_netatmo_claudia_batterie
+
+
+    ######################################################################
+    # BADEZIMMER
+    ######################################################################
+
+    # ThermoBadezimmer Aqara
+    - sensor.thermobadezimmer_temperature                         # Temperatur
+    - sensor.thermobadezimmer_humidity                            # Luftfeuchte
+    - sensor.thermobadezimmer_pressure                            # Luftdruck
+    - sensor.thermobadezimmer_battery                             # Batterie
+
+
+    ######################################################################
+    # SCHLAFZIMMER
+    ######################################################################
+
+    # ThermoSchlafzimmer Aqara
+    - sensor.thermoschlafzimmer_temperature                       # Temperatur
+    - sensor.thermoschlafzimmer_humidity                          # Luftfeuchte
+    - sensor.thermoschlafzimmer_pressure                          # Luftdruck
+    - sensor.thermoschlafzimmer_battery                           # Batterie
+
+    # Netatmo Station Schlafzimmer
+    - sensor.schlafzimmer_netatmo_station_temperatur
+    - sensor.schlafzimmer_netatmo_station_luftfeuchtigkeit
+    - sensor.schlafzimmer_netatmo_station_kohlendioxid
+    - sensor.schlafzimmer_netatmo_station_atmospharischer_druck
+    - sensor.schlafzimmer_netatmo_station_larm
+
+
+    ######################################################################
+    # WC
+    ######################################################################
+
+    # ThermoWC Aqara
+    - sensor.thermowc_temperature                                 # Temperatur
+    - sensor.thermowc_humidity                                    # Luftfeuchte
+    - sensor.thermowc_pressure                                    # Luftdruck
+    - sensor.thermowc_battery                                     # Batterie
+
+
+    ######################################################################
+    # ABSTELLRAUM
+    ######################################################################
+
+    # ThermoAbstellraum Aqara
+    - sensor.thermoabstellraum_temperature                        # Temperatur
+    - sensor.thermoabstellraum_humidity                           # Luftfeuchte
+    - sensor.thermoabstellraum_pressure                           # Luftdruck
+    - sensor.thermoabstellraum_battery                            # Batterie
+
+
+    ######################################################################
+    # GARAGE
+    ######################################################################
+
+    # ThermoGarage Aqara
+    - sensor.thermogarage_temperature                             # Temperatur
+    - sensor.thermogarage_humidity                                # Luftfeuchte
+    - sensor.thermogarage_pressure                                # Luftdruck
+    - sensor.thermogarage_battery                                 # Batterie
+
+
+    ######################################################################
+    # WASCHKÜCHE
+    ######################################################################
+
+    # ThermoWaschkueche
+    - sensor.thermowaschkueche_temperature                        # Temperatur
+    - sensor.thermowaschkueche_humidity                           # Luftfeuchtigkeit
+    - sensor.thermowaschkueche_pressure                           # Luftdruck
+    - sensor.thermowaschkueche_battery                            # Batterie
+
+    # Feuchtesensor AM2301
+    - sensor.feuchte_waschkueche_am2301_temperature               # Temperatur
+    - sensor.feuchte_waschkueche_am2301_humidity                  # Luftfeuchtigkeit
+    - sensor.feuchte_waschkueche_am2301_dewpoint                  # Taupunkt
+
+    # Entfeuchter
+    - sensor.waschkucher_steckdoseentfeuchter_leistung            # Aktuelle Leistung in W
+    - sensor.waschkucher_steckdoseentfeuchter_energie             # Gesamtenergie in kWh
+    - switch.waschkucher_steckdoseentfeuchter                     # Schaltzustand
+    - binary_sensor.waschkucher_steckdoseentfeuchter_uberhitzung  # Überhitzung
+    - binary_sensor.waschkucher_steckdoseentfeuchter_uberlast     # Überlast
+
+    # Ventilator
+    - sensor.nous_4_ventilator_waschkuche_energy_power            # Leistung Ventilator
+    - switch.nous_4_ventilator_waschkuche                         # Schaltzustand Ventilator
+
+
+    ######################################################################
+    # WOHNZIMMER / ERDGESCHOSS
+    ######################################################################
+
+    # Netatmo Erdgeschoss / Wohnzimmer
+    - sensor.wohnzimmer_netatmo_erdgeschoss_temperatur
+    - sensor.wohnzimmer_netatmo_erdgeschoss_luftfeuchtigkeit
+    - sensor.wohnzimmer_netatmo_erdgeschoss_kohlendioxid
+    - sensor.wohnzimmer_netatmo_erdgeschoss_batterie
+
+
+    ######################################################################
+    # GARTEN / NETATMO
+    ######################################################################
+
+    # Netatmo Gartenhaus
+    - sensor.garten_netatmo_gartenhaus_temperatur
+    - sensor.garten_netatmo_gartenhaus_luftfeuchtigkeit
+    - sensor.garten_netatmo_gartenhaus_batterie
+
+    # Netatmo Regenmesser
+    - sensor.garten_netatmo_regenmesser_niederschlagsmenge
+    - sensor.garten_netatmo_regenmesser_niederschlagsmenge_heute
+    - sensor.garten_netatmo_regenmesser_batterie
+
+    # Netatmo Windmesser
+    - sensor.garten_netatmo_windmesser_windgeschwindigkeit
+    - sensor.garten_netatmo_windmesser_windrichtung
+    - sensor.garten_netatmo_windmesser_batterie
+
+    ######################################################################
+    # GARTEN / Rademacher
+    ######################################################################
+    
+    # Wettersensor: Regenerkennung
+    # Binary Sensor: on = Regen erkannt, off = kein Regen
+    - binary_sensor.wettersensor_smart_rain_detection
+
+    # Wettersensor: Sonnenerkennung
+    # Binary Sensor: on = Sonne erkannt, off = keine Sonne erkannt
+    - binary_sensor.wettersensor_smart_sun_detection
+
+    # Wettersensor: Helligkeit
+    # Einheit: Lux (lx)
+    - sensor.wettersensor_smart_brightness
+
+    # Wettersensor: Sonnenrichtung / Azimut
+    # Einheit: Grad (°)
+    - sensor.wettersensor_smart_sun_direction
+
+    # Wettersensor: Sonnenhöhe
+    # Einheit: Grad (°)
+    - sensor.wettersensor_smart_sun_height
+
+    # Wettersensor: Außentemperatur
+    # Einheit: °C
+    - sensor.wettersensor_smart_temperature
+
+    # Wettersensor: Windgeschwindigkeit
+    # Einheit: m/s
+    - sensor.wettersensor_smart_wind_speed
+
+    ######################################################################
+    # ECOWITT GW1200A
+    ######################################################################
+
+    # Außenwerte / Temperatur / Feuchte / Taupunkt
+    - sensor.gw1200a_outdoor_temperature
+    - sensor.gw1200a_humidity
+    - sensor.gw1200a_dewpoint
+    - sensor.gw1200a_feels_like_temperature
+    - sensor.gw1200a_black_globe_temperature
+    - sensor.gw1200a_wet_bulb_globe_temperature
+    - sensor.gw1200a_vapour_pressure_deficit
+
+    # Innenwerte
+    - sensor.gw1200a_indoor_temperature
+    - sensor.gw1200a_indoor_humidity
+    - sensor.gw1200a_indoor_dewpoint
+
+    # Zusätzlicher Temperatur-/Feuchtesensor
+    - sensor.gw1200a_temperature_2
+    - sensor.gw1200a_humidity_2
+    - sensor.gw1200a_dewpoint_2
+
+    # Luftdruck
+    - sensor.gw1200a_absolute_pressure
+    - sensor.gw1200a_relative_pressure
+
+    # Wind
+    - sensor.gw1200a_wind_speed
+    - sensor.gw1200a_wind_gust
+    - sensor.gw1200a_max_daily_gust
+    - sensor.gw1200a_wind_direction
+    - sensor.gw1200a_wind_direction_10m_avg
+    - sensor.gw1200a_windchill
+
+    # Regen
+    - binary_sensor.gw1200a_rain_state_piezo
+    - sensor.gw1200a_rain_rate_piezo
+    - sensor.gw1200a_hourly_rain_piezo
+    - sensor.gw1200a_24h_rain_piezo
+    - sensor.gw1200a_daily_rain_piezo
+    - sensor.gw1200a_weekly_rain_piezo
+    - sensor.gw1200a_monthly_rain_piezo
+    - sensor.gw1200a_yearly_rain_piezo
+    - sensor.gw1200a_event_rain_piezo
+
+    # Blitz
+    - sensor.gw1200a_last_lightning_strike
+    - sensor.gw1200a_lightning_strike_distance
+    - sensor.gw1200a_lightning_strikes
+
+    # Boden
+    - sensor.gw1200a_soil_moisture_1
+    - sensor.gw1200a_soil_battery_1
+
+    # Batterien / Versorgung
+    - binary_sensor.gw1200a_battery_2
+    - binary_sensor.gw1200a_wh26_battery
+    - sensor.gw1200a_wh57_battery
+    - sensor.gw1200a_wh85_battery
+    - sensor.gw1200a_wh85_capacitor
+    - sensor.gw1200a_wn38_battery

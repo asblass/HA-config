@@ -1,0 +1,33 @@
+# Home Assistant interne Daten
+.storage/
+.cloud/
+deps/
+tts/
+www/community/
+
+# Datenbanken
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+home-assistant.log*
+
+# Secrets / Zugangsdaten
+secrets.yaml
+
+# Backups
+backups/
+*.tar
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# temporäre Dateien
+*.tmp
+*.swp
+
+# VS Code
+.vscode/

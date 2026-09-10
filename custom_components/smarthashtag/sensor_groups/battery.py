@@ -1,0 +1,125 @@
+"""Battery-related sensor entity descriptions."""
+
+from __future__ import annotations
+
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntityDescription,
+    SensorStateClass,
+)
+from pysmarthashtag.vehicle.battery import CHARGER_CONNECTION_STATES, CHARGING_STATES
+
+# Home Assistant only offers a sensor's states in the automation editor when the
+# entity declares them as a list of strings. Both lists are derived from the
+# library so a new state cannot silently go missing here.
+CHARGING_STATUS_OPTIONS = [state.lower() for state in CHARGING_STATES]
+
+ENTITY_BATTERY_DESCRIPTIONS = (
+    SensorEntityDescription(
+        key="remaining_range",
+        translation_key="remaining_range",
+        name="Remaining Range",
+        icon="mdi:road-variant",
+        device_class=SensorDeviceClass.DISTANCE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement="km",
+    ),
+    SensorEntityDescription(
+        key="remaining_range_at_full_charge",
+        translation_key="remaining_range_at_full_charge",
+        name="Remaining Range at full battery",
+        icon="mdi:road-variant",
+        device_class=SensorDeviceClass.DISTANCE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement="km",
+    ),
+    SensorEntityDescription(
+        key="remaining_battery_percent",
+        translation_key="remaining_battery_percent",
+        name="Remaining battery charge",
+        icon="mdi:percent",
+        device_class=SensorDeviceClass.BATTERY,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    SensorEntityDescription(
+        key="charging_status",
+        translation_key="charging_status",
+        name="Charging status",
+        icon="mdi:power-plug-battery",
+        options=CHARGING_STATUS_OPTIONS,
+        device_class=SensorDeviceClass.ENUM,
+    ),
+    SensorEntityDescription(
+        key="charging_status_raw",
+        translation_key="charging_status_raw",
+        name="Charging status_raw",
+        icon="mdi:power-plug-battery",
+        entity_registry_enabled_default=False,
+    ),
+    SensorEntityDescription(
+        key="charger_connection_status",
+        translation_key="charger_connection_status",
+        name="Charger connection status",
+        icon="mdi:battery-unknown",
+        options=list(CHARGER_CONNECTION_STATES),
+        device_class=SensorDeviceClass.ENUM,
+        entity_registry_enabled_default=False,
+    ),
+    SensorEntityDescription(
+        key="is_charger_connected",
+        translation_key="is_charger_connected",
+        name="is charger connected",
+        icon="mdi:power-plug-battery",
+    ),
+    SensorEntityDescription(
+        key="charging_voltage",
+        translation_key="charging_voltage",
+        name="Charging voltage",
+        icon="mdi:car-battery",
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    SensorEntityDescription(
+        key="charging_current",
+        translation_key="charging_current",
+        name="Charging current",
+        icon="mdi:car-battery",
+        device_class=SensorDeviceClass.CURRENT,
+        native_unit_of_measurement="A",
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    SensorEntityDescription(
+        key="charging_power",
+        translation_key="charging_power",
+        name="Charging power",
+        icon="mdi:car-battery",
+        device_class=SensorDeviceClass.POWER,
+        native_unit_of_measurement="W",
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    SensorEntityDescription(
+        key="charging_time_remaining",
+        translation_key="charging_time_remaining",
+        name="Charging time remaining",
+        icon="mdi:clock-outline",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement="min",
+    ),
+    SensorEntityDescription(
+        key="charging_target_soc",
+        translation_key="charging_target_soc",
+        name="Target state of charge",
+        icon="mdi:percent",
+        device_class=SensorDeviceClass.BATTERY,
+        entity_registry_enabled_default=False,
+    ),
+    SensorEntityDescription(
+        key="average_power_consumption",
+        translation_key="average_power_consumption",
+        name="Range efficiency factor",
+        icon="mdi:gauge",
+        native_unit_of_measurement="%",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+    ),
+)

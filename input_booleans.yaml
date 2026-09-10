@@ -1,0 +1,7 @@
+stehlampe_wohnzimmer_automatik_aktiv:
+  name: Stehlampe Wohnzimmer Automatik aktiv
+  icon: mdi:floor-lamp
+
+stehlampe_flur_og_manuelle_sperre:
+  name: Stehlampe Flur OG manuelle Sperre
+  icon: mdi:lock

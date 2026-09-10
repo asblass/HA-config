@@ -1,0 +1,509 @@
+{
+  "config": {
+    "flow_title": "Smart #1/#3",
+    "step": {
+      "user": {
+        "description": "Smart.com Login",
+        "data": {
+          "username": "Benutzername",
+          "password": "Passwort",
+          "region": "Region / Endpunkt"
+        }
+      },
+      "vehicle": {
+        "description": "Fahrzeug VIN auswählen",
+        "data": {
+          "vehicle": "Vehicle Identification Number"
+        }
+      },
+      "custom_endpoints": {
+        "description": "Benutzerdefinierte API-Endpunkte konfigurieren. Mindestens eine URL muss angegeben werden.",
+        "data": {
+          "api_base_url": "API-Basis-URL",
+          "api_base_url_v2": "API-Basis-URL v2"
+        }
+      }
+    },
+    "error": {
+      "auth": "Authentifizierung fehlgeschlagen, bitte überprüfen Sie Ihre Anmeldeinformationen und versuchen Sie es erneut.",
+      "custom_endpoints_required": "Mindestens eine benutzerdefinierte Endpunkt-URL muss angegeben werden"
+    },
+    "abort": {}
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "scan_interval": "Sekunden zwischen den Scans",
+          "charging_interval": "Sekunden zwischen den Scans während des Ladens",
+          "driving_interval": "Sekunden zwischen den Scans während der Fahrt",
+          "conditioning_temp": "Zieltemperatur Vorklimatisierung"
+        }
+      }
+    }
+  },
+  "entity": {
+    "climate": {
+      "car_climate": {
+        "name": "Klimaanlage"
+      }
+    },
+    "switch": {
+      "charging_control": {
+        "name": "Ladesteuerung"
+      }
+    },
+    "select": {
+      "steering_wheel_heater": {
+        "name": "Lenkradheizung"
+      },
+      "driver_seat_heater": {
+        "name": "Fahrersitzheizung"
+      },
+      "passenger_seat_heater": {
+        "name": "Beifahrersitzheizung"
+      }
+    },
+    "sensor": {
+      "remaining_range": {
+        "name": "Reichweite"
+      },
+      "remaining_range_at_full_charge": {
+        "name": "Reichweite bei voller Ladung"
+      },
+      "remaining_battery_percent": {
+        "name": "Batterie"
+      },
+      "charging_status": {
+        "name": "Ladezustand",
+        "state": {
+          "not_charging": "nicht verbunden",
+          "complete": "fertig geladen",
+          "charging": "laden",
+          "dc_charging": "DC LAden",
+          "default": "Standard",
+          "error": "Fehler",
+          "fully_charged": "voll geladen",
+          "finished_fully_charged": "beendet, voll geladen",
+          "finished_not_full": "beendet, nicht voll",
+          "invalid": "ungültig",
+          "plugged_in": "eingesteckt",
+          "waiting_for_charging": "wartet auf Ladung",
+          "target_reached": "Ziel erreicht"
+        }
+      },
+      "charging_status_raw": {
+        "name": "Ladezustand Rohwert"
+      },
+      "charger_connection_status": {
+        "name": "Ladeanschluss",
+        "state": {
+          "not_connected": "nicht verbunden",
+          "dc_connected": "dc verbunden",
+          "plugged_not_charging": "verbunden, nicht ladend",
+          "charging": "laden"
+        }
+      },
+      "is_charger_connected": {
+        "name": "Ladegerät angeschlossen"
+      },
+      "charging_voltage": {
+        "name": "Ladespannung"
+      },
+      "charging_current": {
+        "name": "Ladestrom"
+      },
+      "charging_power": {
+        "name": "Ladeleistung"
+      },
+      "charging_time_remaining": {
+        "name": "Verbleibende Ladezeit"
+      },
+      "charging_target_soc": {
+        "name": "Ladeziel"
+      },
+      "average_power_consumption": {
+        "name": "Reichweiteneffizienzfaktor"
+      },
+      "position": {
+        "name": "Position"
+      },
+      "position_can_be_trusted": {
+        "name": "Position vertrauenswürdig"
+      },
+      "temperature_0": {
+        "name": "Temperatur Fahrerseite vorne"
+      },
+      "temperature_1": {
+        "name": "Temperatur Fahrerseite hinten"
+      },
+      "temperature_2": {
+        "name": "Temperatur Beifahrerseite vorne"
+      },
+      "temperature_3": {
+        "name": "Temperatur Beifahrerseite hinten"
+      },
+      "tire_pressure_0": {
+        "name": "Reifendruck Fahrerseite vorne"
+      },
+      "tire_pressure_1": {
+        "name": "Reifendruck Fahrerseite hinten"
+      },
+      "tire_pressure_2": {
+        "name": "Reifendruck Beifahrerseite vorne"
+      },
+      "tire_pressure_3": {
+        "name": "Reifendruck Beifahrerseite hinten"
+      },
+      "main_battery_state_of_charge": {
+        "name": "12V Batterie Ladezustand"
+      },
+      "main_battery_charge_level": {
+        "name": "12V Batterie Ladestand"
+      },
+      "main_battery_energy_level": {
+        "name": "12V Batterie Energiestand"
+      },
+      "main_battery_state_of_health": {
+        "name": "12V Batterie Zustand"
+      },
+      "main_battery_power_level": {
+        "name": "12V Batterie Leistung"
+      },
+      "main_battery_voltage": {
+        "name": "12V Batterie Spannung"
+      },
+      "odometer": {
+        "name": "Kilometerstand"
+      },
+      "days_to_service": {
+        "name": "Tage bis Service"
+      },
+      "engine_hours_to_service": {
+        "name": "Motorstunden bis Service"
+      },
+      "distance_to_service": {
+        "name": "Kilometer bis Service"
+      },
+      "break_fluid_level_status": {
+        "name": "Bremsflüssigkeitsstand"
+      },
+      "washer_fluid_level_status": {
+        "name": "Wischwasserstand"
+      },
+      "service_warning_status": {
+        "name": "Service Warnung"
+      },
+      "last_update": {
+        "name": "Letztes Daten Update"
+      },
+      "ahbc_status": {
+        "name": "Fernlichtassistent",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "goodbye": {
+        "name": "Goodbye Licht",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "home_safe": {
+        "name": "Home Safe Licht",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "corner_light": {
+        "name": "Kurvenlicht",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "front_fog_light": {
+        "name": "Nebelscheinwerfer vorne",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "stop_light": {
+        "name": "Bremslicht",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "trip_meter1": {
+        "name": "Tageskilometerzähler 1"
+      },
+      "trip_meter2": {
+        "name": "Tageskilometerzähler 2"
+      },
+      "approach": {
+        "name": "Annäherungslicht",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "high_beam": {
+        "name": "Fernlicht",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "engine_coolant_level_status": {
+        "name": "Motor Kühlmittelstand"
+      },
+      "low_beam": {
+        "name": "Abblendlicht",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "position_light_rear": {
+        "name": "Rücklicht",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "light_show": {
+        "name": "Lichtshow",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "welcome": {
+        "name": "Willkommenslicht",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "drl": {
+        "name": "Tagfahrlicht",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "ahl": {
+        "name": "Adaptive Scheinwerfer",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "turn_indicator_left": {
+        "name": "Blinker Links",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "turn_indicator_right": {
+        "name": "Blinker Rechts",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "adaptive_front_light": {
+        "name": "Adaptive Frontbeleuchtung",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "dbl": {
+        "name": "Dynamisches Blinklicht",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "average_speed": {
+        "name": "Durchschnittsgeschwindigkeit"
+      },
+      "position_light_front": {
+        "name": "Frontlicht",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "reverse_light": {
+        "name": "Rückfahrlicht",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "highway_light": {
+        "name": "Autobahnlicht",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "rear_fog_light": {
+        "name": "Nebelschlussleuchte",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "flash_light": {
+        "name": "Warnblinker",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "all_weather_light": {
+        "name": "Allwetterlicht",
+        "state": {
+          "0": "Aus",
+          "1": "An"
+        }
+      },
+      "engine_state": {
+        "name": "Motor",
+        "state": {
+          "engine_off": "Aus",
+          "engine_running": "An"
+        }
+      },
+      "air_blower_active": {
+        "name": "Lüfter aktiv"
+      },
+      "cds_climate_active": {
+        "name": "CDS Klima aktiv"
+      },
+      "climate_over_heat_protection_active": {
+        "name": "Überhitzungsschutz aktiv"
+      },
+      "curtain_open_status": {
+        "name": "Rollo offen"
+      },
+      "defrosting_active": {
+        "name": "Enteisung aktiv"
+      },
+      "driver_heating_detail": {
+        "name": "Heizung Fahrerseite Detail"
+      },
+      "driver_heating_status": {
+        "name": "Heizung Fahrerseite Status"
+      },
+      "driver_ventilation_detail": {
+        "name": "Lüftung Fahrerseite Detail"
+      },
+      "driver_ventilation_status": {
+        "name": "Lüftung Fahrerseite Status"
+      },
+      "exterior_temperature": {
+        "name": "Außentemperatur"
+      },
+      "frag_active": {
+        "name": "FRAG aktiv"
+      },
+      "interior_temperature": {
+        "name": "Innentemperatur"
+      },
+      "passenger_heating_detail": {
+        "name": "Heizung Beifahrerseite Detail"
+      },
+      "passenger_heating_status": {
+        "name": "Heizung Beifahrerseite Status"
+      },
+      "passenger_ventilation_detail": {
+        "name": "Lüftung Beifahrerseite Detail"
+      },
+      "passenger_ventilation_status": {
+        "name": "Lüftung Beifahrerseite Status"
+      },
+      "pre_climate_active": {
+        "name": "Vorklimatisierung aktiv"
+      },
+      "rear_left_heating_detail": {
+        "name": "Heizung hinten links Detail"
+      },
+      "rear_left_heating_status": {
+        "name": "Heizung hinten links Status"
+      },
+      "rear_left_ventilation_detail": {
+        "name": "Lüftung hinten links Detail"
+      },
+      "rear_left_ventilation_status": {
+        "name": "Lüftung hinten links Status"
+      },
+      "rear_right_heating_detail": {
+        "name": "Heizung hinten rechts Detail"
+      },
+      "rear_right_heating_status": {
+        "name": "Heizung hinten rechts Status"
+      },
+      "rear_right_ventilation_detail": {
+        "name": "Lüftung hinten rechts Detail"
+      },
+      "rear_right_ventilation_status": {
+        "name": "Lüftung hinten rechts Status"
+      },
+      "steering_wheel_heating_status": {
+        "name": "Heizung Lenkrad Status"
+      },
+      "sun_curtain_rear_open_status": {
+        "name": "Sonnenrollo hinten offen"
+      },
+      "sun_curtain_rear_position": {
+        "name": "Sonnenrollo hinten Position"
+      },
+      "sunroof_open_status": {
+        "name": "Schiebedach offen"
+      },
+      "sunroof_position": {
+        "name": "Schiebedach Position"
+      },
+      "window_driver_position": {
+        "name": "Fenster Fahrerseite Position"
+      },
+      "window_driver_rear_position": {
+        "name": "Fenster Fahrerseite hinten Position"
+      },
+      "window_passenger_position": {
+        "name": "Fenster Beifahrerseite Position"
+      },
+      "window_passenger_rear_position": {
+        "name": "Fenster Beifahrerseite hinten Position"
+      },
+      "window_driver_status": {
+        "name": "Fenster Fahrerseite Status"
+      },
+      "window_driver_rear_status": {
+        "name": "Fenster Fahrerseite hinten Status"
+      },
+      "window_passenger_status": {
+        "name": "Fenster Beifahrerseite Status"
+      },
+      "window_passenger_rear_status": {
+        "name": "Fenster Beifahrerseite hinten Status"
+      },
+      "interior_pm25": {
+        "name": "Innenraum Feinstaub"
+      },
+      "relative_humidity": {
+        "name": "Luftfeuchtigkeit"
+      }
+    }
+  }
+}

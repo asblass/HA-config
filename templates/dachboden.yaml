@@ -1,0 +1,21 @@
+- sensor:
+    - name: "Taupunkt Dachboden"
+      unique_id: taupunkt_dachboden
+      unit_of_measurement: "°C"
+      device_class: temperature
+      state_class: measurement
+      availability: >
+        {{ is_number(states('sensor.thermodachboden_temperature'))
+           and is_number(states('sensor.thermodachboden_humidity'))
+           and 0 < states('sensor.thermodachboden_humidity') | float(0) <= 100 }}
+      state: >
+        {% set t = states('sensor.thermodachboden_temperature') | float(0) %}
+        {% set rh = states('sensor.thermodachboden_humidity') | float(0) %}
+        {% if 0 < rh <= 100 %}
+        {% set a = 17.62 %}
+        {% set b = 243.12 %}
+        {% set gamma = log(rh / 100) + ((a * t) / (b + t)) %}
+        {{ ((b * gamma) / (a - gamma)) | round(2) }}
+        {% else %}
+          {{ none }}
+        {% endif %}

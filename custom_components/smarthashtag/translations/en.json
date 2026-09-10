@@ -1,0 +1,509 @@
+{
+  "config": {
+    "flow_title": "Smart #1/#3",
+    "step": {
+      "user": {
+        "description": "Smart.com Login information",
+        "data": {
+          "username": "Username",
+          "password": "Password",
+          "region": "Region / Endpoint"
+        }
+      },
+      "vehicle": {
+        "description": "Select vehicle VIN",
+        "data": {
+          "vehicle": "Vehicle identification number"
+        }
+      },
+      "custom_endpoints": {
+        "description": "Configure custom API endpoints. At least one URL must be provided.",
+        "data": {
+          "api_base_url": "API Base URL",
+          "api_base_url_v2": "API Base URL v2"
+        }
+      }
+    },
+    "error": {
+      "auth": "Auth failed, please check your username and password",
+      "custom_endpoints_required": "At least one custom endpoint URL must be provided"
+    },
+    "abort": {}
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "scan_interval": "Seconds between each scan",
+          "charging_interval": "Seconds between each scan while charging",
+          "driving_interval": "Seconds between each scan while driving",
+          "conditioning_temp": "Target temperature preconditioning"
+        }
+      }
+    }
+  },
+  "entity": {
+    "climate": {
+      "car_climate": {
+        "name": "Car climate"
+      }
+    },
+    "switch": {
+      "charging_control": {
+        "name": "Charging control"
+      }
+    },
+    "select": {
+      "steering_wheel_heater": {
+        "name": "Steering wheel heater"
+      },
+      "driver_seat_heater": {
+        "name": "Driver seat heater"
+      },
+      "passenger_seat_heater": {
+        "name": "Passenger seat heater"
+      }
+    },
+    "sensor": {
+      "remaining_range": {
+        "name": "Range"
+      },
+      "remaining_range_at_full_charge": {
+        "name": "Range at full charge"
+      },
+      "remaining_battery_percent": {
+        "name": "Battery"
+      },
+      "charging_status": {
+        "name": "Charging status",
+        "state": {
+          "not_charging": "not connected",
+          "complete": "done charging",
+          "charging": "charging",
+          "dc_charging": "DC charging",
+          "default": "Default",
+          "error": "Error",
+          "fully_charged": "fully charged",
+          "finished_fully_charged": "finished, fully charged",
+          "finished_not_full": "finished, not full",
+          "invalid": "invalid",
+          "plugged_in": "plugged in",
+          "waiting_for_charging": "waiting for charging",
+          "target_reached": "target reached"
+        }
+      },
+      "charging_status_raw": {
+        "name": "Charging status raw value"
+      },
+      "charger_connection_status": {
+        "name": "Charger connection",
+        "state": {
+          "not_connected": "not connected",
+          "dc_connected": "dc connected",
+          "plugged_not_charging": "plugged, not charging",
+          "charging": "charging"
+        }
+      },
+      "is_charger_connected": {
+        "name": "Charger connected"
+      },
+      "charging_voltage": {
+        "name": "Charging voltage"
+      },
+      "charging_current": {
+        "name": "Charging current"
+      },
+      "charging_power": {
+        "name": "Charging power"
+      },
+      "charging_time_remaining": {
+        "name": "Charging time remaining"
+      },
+      "charging_target_soc": {
+        "name": "Charging target"
+      },
+      "average_power_consumption": {
+        "name": "Range Efficiency Factor"
+      },
+      "position": {
+        "name": "Position"
+      },
+      "position_can_be_trusted": {
+        "name": "Position can be trusted"
+      },
+      "temperature_0": {
+        "name": "Tire temperature driver front"
+      },
+      "temperature_1": {
+        "name": "Tire temperature driver rear"
+      },
+      "temperature_2": {
+        "name": "Tire temperature passenger front"
+      },
+      "temperature_3": {
+        "name": "Tire temperature passenger rear"
+      },
+      "tire_pressure_0": {
+        "name": "Tire pressure driver front"
+      },
+      "tire_pressure_1": {
+        "name": "Tire pressure driver rear"
+      },
+      "tire_pressure_2": {
+        "name": "Tire pressure passenger front"
+      },
+      "tire_pressure_3": {
+        "name": "Tire pressure passenger rear"
+      },
+      "main_battery_state_of_charge": {
+        "name": "12V battery state of charge"
+      },
+      "main_battery_charge_level": {
+        "name": "12V battery charge level"
+      },
+      "main_battery_energy_level": {
+        "name": "12V battery energy level"
+      },
+      "main_battery_state_of_health": {
+        "name": "12V battery state of health"
+      },
+      "main_battery_power_level": {
+        "name": "12V battery power level"
+      },
+      "main_battery_voltage": {
+        "name": "12V battery voltage"
+      },
+      "odometer": {
+        "name": "Odometer"
+      },
+      "days_to_service": {
+        "name": "Days to service"
+      },
+      "engine_hours_to_service": {
+        "name": "Engine hours to service"
+      },
+      "distance_to_service": {
+        "name": "Distance to service"
+      },
+      "break_fluid_level_status": {
+        "name": "Break fluid level"
+      },
+      "washer_fluid_level_status": {
+        "name": "Washer fluid level"
+      },
+      "service_warning_status": {
+        "name": "Service warning"
+      },
+      "last_update": {
+        "name": "Last update"
+      },
+      "ahbc_status": {
+        "name": "Adaptive High Beam Control",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "goodbye": {
+        "name": "Goodbye light",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "home_safe": {
+        "name": "Home Safe Light",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "corner_light": {
+        "name": "Corner light",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "front_fog_light": {
+        "name": "Front fog light",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "stop_light": {
+        "name": "Stop light",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "trip_meter1": {
+        "name": "Trip meter 1"
+      },
+      "trip_meter2": {
+        "name": "Trip meter 2"
+      },
+      "approach": {
+        "name": "Approach light",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "high_beam": {
+        "name": "High beam",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "engine_coolant_level_status": {
+        "name": "Engine coolant level"
+      },
+      "low_beam": {
+        "name": "Low beam",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "position_light_rear": {
+        "name": "Rear position light",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "light_show": {
+        "name": "Light show",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "welcome": {
+        "name": "Welcome light",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "drl": {
+        "name": "Daytime running light",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "ahl": {
+        "name": "Adaptive headlight",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "turn_indicator_left": {
+        "name": "Indicator left",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "turn_indicator_right": {
+        "name": "Indicator right",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "adaptive_front_light": {
+        "name": "Adaptive front lighting",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "dbl": {
+        "name": "Dynamic bending light",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "average_speed": {
+        "name": "Average speed"
+      },
+      "position_light_front": {
+        "name": "Front position light",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "reverse_light": {
+        "name": "Reverse light",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "highway_light": {
+        "name": "Highway light",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "rear_fog_light": {
+        "name": "Rear fog light",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "flash_light": {
+        "name": "Flash light",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "all_weather_light": {
+        "name": "All weather light",
+        "state": {
+          "0": "Off",
+          "1": "On"
+        }
+      },
+      "engine_state": {
+        "name": "Motor",
+        "state": {
+          "engine_off": "Off",
+          "engine_running": "On"
+        }
+      },
+      "air_blower_active": {
+        "name": "Air blower active"
+      },
+      "cds_climate_active": {
+        "name": "CDS climate active"
+      },
+      "climate_over_heat_protection_active": {
+        "name": "Climate over heat protection active"
+      },
+      "curtain_open_status": {
+        "name": "Curtain open status"
+      },
+      "defrosting_active": {
+        "name": "Defrosting active"
+      },
+      "driver_heating_detail": {
+        "name": "Driver heating detail"
+      },
+      "driver_heating_status": {
+        "name": "Driver heating status"
+      },
+      "driver_ventilation_detail": {
+        "name": "Driver ventilation detail"
+      },
+      "driver_ventilation_status": {
+        "name": "Driver ventilation status"
+      },
+      "exterior_temperature": {
+        "name": "Exterior temperature"
+      },
+      "frag_active": {
+        "name": "FRAG active"
+      },
+      "interior_temperature": {
+        "name": "Interior temperature"
+      },
+      "passenger_heating_detail": {
+        "name": "Passenger heating detail"
+      },
+      "passenger_heating_status": {
+        "name": "Passenger heating status"
+      },
+      "passenger_ventilation_detail": {
+        "name": "Passenger ventilation detail"
+      },
+      "passenger_ventilation_status": {
+        "name": "Passenger ventilation status"
+      },
+      "pre_climate_active": {
+        "name": "Pre climate active"
+      },
+      "rear_left_heating_detail": {
+        "name": "Rear left heating detail"
+      },
+      "rear_left_heating_status": {
+        "name": "Rear left heating status"
+      },
+      "rear_left_ventilation_detail": {
+        "name": "Rear left ventilation detail"
+      },
+      "rear_left_ventilation_status": {
+        "name": "Rear left ventilation status"
+      },
+      "rear_right_heating_detail": {
+        "name": "Rear right heating detail"
+      },
+      "rear_right_heating_status": {
+        "name": "Rear right heating status"
+      },
+      "rear_right_ventilation_detail": {
+        "name": "Rear right ventilation detail"
+      },
+      "rear_right_ventilation_status": {
+        "name": "Rear right ventilation status"
+      },
+      "steering_wheel_heating_status": {
+        "name": "Steering wheel heating status"
+      },
+      "sun_curtain_rear_open_status": {
+        "name": "Sun curtain rear open status"
+      },
+      "sun_curtain_rear_position": {
+        "name": "Sun curtain rear position"
+      },
+      "sunroof_open_status": {
+        "name": "Sunroof open status"
+      },
+      "sunroof_position": {
+        "name": "Sunroof position"
+      },
+      "window_driver_position": {
+        "name": "Window driver position"
+      },
+      "window_driver_rear_position": {
+        "name": "Window driver rear position"
+      },
+      "window_passenger_position": {
+        "name": "Window passenger position"
+      },
+      "window_passenger_rear_position": {
+        "name": "Window passenger rear position"
+      },
+      "window_driver_status": {
+        "name": "Window driver status"
+      },
+      "window_driver_rear_status": {
+        "name": "Window driver rear status"
+      },
+      "window_passenger_status": {
+        "name": "Window passenger status"
+      },
+      "window_passenger_rear_status": {
+        "name": "Window passenger rear status"
+      },
+      "interior_pm25": {
+        "name": "Interior PM25"
+      },
+      "relative_humidity": {
+        "name": "Relative humidity"
+      }
+    }
+  }
+}

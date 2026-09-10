@@ -1,0 +1,478 @@
+"""High-level Tedee lock command interface.
+
+Provides operations like unlock, lock, get state, get battery, and set signed time.
+All commands are sent encrypted via the PTLS session over BLE.
+"""
+
+import asyncio
+import base64
+import logging
+import struct
+import time
+
+from .ble import TedeeBLETransport
+from .ptls import PTLSDuplicateError, PTLSError, PTLSSession
+
+logger = logging.getLogger(__name__)
+
+# Command opcodes
+CMD_GET_BATTERY = 0x0C
+CMD_GET_DOOR_STATE = 0x37
+CMD_LOCK = 0x50
+CMD_UNLOCK = 0x51
+CMD_PULL_SPRING = 0x52
+CMD_GET_STATE = 0x5A
+CMD_SET_SIGNED_DATETIME = 0x71
+
+# Unlock parameters
+UNLOCK_NONE = 0x00          # Default (includes auto-pull if lock has it enabled)
+UNLOCK_AUTO = 0x01          # Triggered by auto-unlock feature
+UNLOCK_FORCE = 0x02         # Force/emergency unlock
+UNLOCK_NO_PULL = 0x03       # Unlock without auto-pull spring
+
+# Lock parameters
+LOCK_NONE = 0x00
+LOCK_FORCE = 0x02
+
+# Result codes
+RESULT_SUCCESS = 0x00
+RESULT_INVALID_PARAM = 0x01
+RESULT_ERROR = 0x02
+RESULT_BUSY = 0x03
+RESULT_NOT_CALIBRATED = 0x05
+
+RESULT_NAMES = {
+    0x00: "SUCCESS",
+    0x01: "INVALID_PARAM",
+    0x02: "ERROR",
+    0x03: "BUSY",
+    0x05: "NOT_CALIBRATED",
+    0x06: "ALREADY_CALLED_BY_AUTOUNLOCK",
+    0x08: "NOT_CONFIGURED",
+    0x09: "DISMOUNTED",
+    0x0A: "ALREADY_CALLED_BY_OTHER_OPERATION",
+}
+
+# Lock state values
+LOCK_STATE_UNCALIBRATED = 0x00
+LOCK_STATE_CALIBRATION = 0x01
+LOCK_STATE_UNLOCKED = 0x02
+LOCK_STATE_PARTIALLY_UNLOCKED = 0x03
+LOCK_STATE_UNLOCKING = 0x04
+LOCK_STATE_LOCKING = 0x05
+LOCK_STATE_LOCKED = 0x06
+LOCK_STATE_PULL_SPRING = 0x07
+LOCK_STATE_PULLING = 0x08
+LOCK_STATE_UNKNOWN = 0x09
+LOCK_STATE_UPDATING = 0x12
+
+LOCK_STATE_NAMES = {
+    0x00: "UNCALIBRATED",
+    0x01: "CALIBRATION",
+    0x02: "UNLOCKED",
+    0x03: "PARTIALLY_UNLOCKED",
+    0x04: "UNLOCKING",
+    0x05: "LOCKING",
+    0x06: "LOCKED",
+    0x07: "PULL_SPRING",
+    0x08: "PULLING",
+    0x09: "UNKNOWN",
+    0x12: "UPDATING",
+}
+
+# States the lock passes through mid-move. It sends a terminal state
+# notification once it settles; if that one is missed the state read that
+# follows has to stand in for it.
+TRANSITIONAL_LOCK_STATES = frozenset({
+    LOCK_STATE_UNLOCKING,
+    LOCK_STATE_LOCKING,
+    LOCK_STATE_PULL_SPRING,
+    LOCK_STATE_PULLING,
+})
+
+# State change status
+STATUS_OK = 0x00
+STATUS_JAMMED = 0x01
+
+# Door sensor state
+DOOR_STATE_UNKNOWN = 0x00
+DOOR_STATE_OPEN = 0x02
+DOOR_STATE_CLOSED = 0x03
+
+DOOR_STATE_NAMES = {
+    0x00: "UNKNOWN",
+    0x02: "OPEN",
+    0x03: "CLOSED",
+}
+
+# Lock trigger/source (byte 3 of LOCK_STATUS_CHANGE notification)
+# Bytes 4-7 = access ID (big-endian uint32, non-zero for user-initiated actions)
+TRIGGER_BUTTON = 0x01       # Button press on lock
+TRIGGER_REMOTE = 0x02       # Remote (app/BLE command)
+TRIGGER_AUTO_LOCK = 0x04    # Auto-lock (after door closed)
+TRIGGER_DOOR_SENSOR = 0x10  # Door sensor state change
+TRIGGER_KEYPAD = 0x17       # Keypad PIN entry
+
+TRIGGER_NAMES = {
+    0x00: "manual",
+    0x01: "button",
+    0x02: "remote",
+    0x04: "auto_lock",
+    0x05: "auto",
+    0x08: "auto_unlock",
+    0x10: "door_sensor",
+    0x17: "keypad",
+}
+
+# Notification IDs
+NOTIFY_LOCK_STATUS_CHANGE = 0xBA
+NOTIFY_SIGNED_DATETIME = 0x7B
+NOTIFY_BATTERY = 0xA0
+NOTIFY_NEED_DATE_TIME = 0xA4
+NOTIFY_HAS_LOGS = 0xA5
+NOTIFY_BATTERY_START_CHARGING = 0xBC
+NOTIFY_BATTERY_STOP_CHARGING = 0xBD
+NOTIFY_BATTERY_FULLY_CHARGED = 0xBE
+NOTIFY_ACCESSORY_BATTERY = 0xD5
+NOTIFY_DEVICE_STATS = 0xE2
+
+
+class CommandError(Exception):
+    def __init__(self, result_code: int):
+        self.result_code = result_code
+        name = RESULT_NAMES.get(result_code, f"0x{result_code:02x}")
+        super().__init__(f"Command failed: {name}")
+
+
+class TedeeLock:
+    """High-level interface for controlling a Tedee lock."""
+
+    def __init__(
+        self,
+        transport: TedeeBLETransport,
+        session: PTLSSession,
+        initial_door_state: int = DOOR_STATE_UNKNOWN,
+    ):
+        self.transport = transport
+        self.session = session
+        self.door_state: int = initial_door_state
+        self._consecutive_decrypt_failures: int = 0
+
+    async def _send_command(self, command: bytes, timeout: float = 10.0) -> bytes:
+        """Send an encrypted command and receive its response.
+
+        The lock's API responses are sometimes delivered twice by BlueZ/proxies.
+        A leftover duplicate would otherwise be read as the *next* command's
+        response, shifting the request/response stream by one — that is what made
+        get_state() periodically return the battery reply (0x0c, level byte) as
+        the lock state, so HA flipped to "unlocked", and made the following
+        battery read fail on a counter desync.
+
+        To stay aligned we (1) drain any stale frames before writing and
+        (2) keep reading until we get a frame whose opcode matches this command,
+        skipping undecryptable duplicates (their PTLS counter is already spent).
+        """
+        opcode = command[0]
+        logger.debug("Sending command: opcode=0x%02x, len=%d", opcode, len(command))
+
+        dropped = self.transport.drain_api_command_queue()
+        if dropped:
+            logger.debug(
+                "Dropped %d stale API frame(s) before command 0x%02x", dropped, opcode
+            )
+
+        encrypted = self.session.encrypt(command)
+        await self.transport.write_api_command(encrypted)
+
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PTLSError(
+                    f"Timed out waiting for response to command 0x{opcode:02x}"
+                )
+            response = await self.transport.read_api_command(timeout=remaining)
+            logger.debug(
+                "Received response: len=%d, header=0x%02x", len(response), response[0]
+            )
+            try:
+                decrypted = await self.session.async_decrypt(response)
+            except PTLSError as err:
+                # Duplicate of an earlier frame: its counter is already consumed
+                # so it can't decrypt. Discard it and wait for the real response.
+                logger.warning("Skipping undecryptable API frame: %s", err)
+                continue
+            logger.debug("Command response raw: %s", decrypted.hex())
+
+            # Response format: [opcode] [result_code] [data...]
+            if decrypted and decrypted[0] != opcode:
+                logger.warning(
+                    "Skipping stale API response (opcode 0x%02x, expected 0x%02x)",
+                    decrypted[0], opcode,
+                )
+                continue
+            return decrypted[1:]
+
+    async def set_signed_time(self, signed_time: dict) -> None:
+        """Set signed datetime on the lock. Must be called first after session establishment."""
+        dt_bytes = base64.b64decode(signed_time["datetime"])
+        sig_bytes = base64.b64decode(signed_time["signature"])
+
+        payload = bytes([CMD_SET_SIGNED_DATETIME]) + dt_bytes + sig_bytes
+
+        logger.info("Setting signed datetime...")
+        response = await self._send_command(payload)
+
+        result = response[0]
+        if result != RESULT_SUCCESS:
+            raise CommandError(result)
+        logger.info("Signed datetime set successfully")
+
+    async def unlock(self, mode: int = UNLOCK_NONE) -> int:
+        """Unlock the door."""
+        command = bytes([CMD_UNLOCK, mode])
+        logger.info("Sending UNLOCK command (mode=0x%02x)...", mode)
+        response = await self._send_command(command)
+
+        result = response[0]
+        if result != RESULT_SUCCESS:
+            raise CommandError(result)
+        logger.info("Unlock command accepted")
+        return result
+
+    async def lock(self, mode: int = LOCK_NONE) -> int:
+        """Lock the door."""
+        command = bytes([CMD_LOCK, mode])
+        logger.info("Sending LOCK command (mode=0x%02x)...", mode)
+        response = await self._send_command(command)
+
+        result = response[0]
+        if result != RESULT_SUCCESS:
+            raise CommandError(result)
+        logger.info("Lock command accepted")
+        return result
+
+    async def pull_spring(self) -> int:
+        """Activate pull spring mechanism."""
+        command = bytes([CMD_PULL_SPRING])
+        logger.info("Sending PULL_SPRING command...")
+        response = await self._send_command(command)
+
+        result = response[0]
+        if result != RESULT_SUCCESS:
+            raise CommandError(result)
+        logger.info("Pull spring command accepted")
+        return result
+
+
+    async def get_state(self) -> tuple[int, int, int]:
+        """Get current lock state.
+
+        Returns:
+            (lock_state, status, door_state) tuple
+        """
+        command = bytes([CMD_GET_STATE])
+        logger.info("Getting lock state...")
+        response = await self._send_command(command)
+
+        result = response[0]
+        if result != RESULT_SUCCESS:
+            raise CommandError(result)
+
+        lock_state = response[1]
+        status = response[2] if len(response) > 2 else STATUS_OK
+
+        state_name = LOCK_STATE_NAMES.get(lock_state, f"0x{lock_state:02x}")
+        door_name = DOOR_STATE_NAMES.get(self.door_state, f"0x{self.door_state:02x}")
+        logger.info("Lock state: %s, Status: %s, Door: %s",
+                     state_name, "OK" if status == 0 else "JAMMED", door_name)
+        return lock_state, status, self.door_state
+
+    async def drain_pending_notifications(self) -> None:
+        """Drain any pending notifications after connect."""
+        await asyncio.sleep(0.3)
+        drained = 0
+        while True:
+            try:
+                data = await self.transport.read_notification(timeout=0.3)
+                await self.parse_notification(data)
+                drained += 1
+            except asyncio.TimeoutError:
+                break
+        if drained:
+            logger.debug("Drained %d pending notifications", drained)
+
+    async def get_battery(self) -> tuple[int, bool]:
+        """Get battery level and charging status."""
+        command = bytes([CMD_GET_BATTERY])
+        logger.info("Getting battery info...")
+        response = await self._send_command(command)
+
+        result = response[0]
+        if result != RESULT_SUCCESS:
+            raise CommandError(result)
+
+        level = response[1]
+        is_charging = response[2] == 1 if len(response) > 2 else False
+
+        logger.info("Battery: %d%%, Charging: %s", level, is_charging)
+        return level, is_charging
+
+    async def get_door_state(self) -> int:
+        """Get current door sensor state (GET_DOOR_STATE 0x37).
+
+        Response format: [result_code][door_state_byte]. Raises CommandError
+        if the lock has no paired door sensor (firmware returns non-success).
+        Also updates self.door_state on success so subsequent get_state()
+        calls return the fresh value.
+        """
+        command = bytes([CMD_GET_DOOR_STATE])
+        logger.debug("Getting door state...")
+        response = await self._send_command(command)
+
+        result = response[0]
+        if result != RESULT_SUCCESS:
+            raise CommandError(result)
+
+        door_state = response[1] if len(response) > 1 else DOOR_STATE_UNKNOWN
+        self.door_state = door_state
+        name = DOOR_STATE_NAMES.get(door_state, f"0x{door_state:02x}")
+        logger.info("Door state: %s", name)
+        return door_state
+
+    async def parse_notification(self, data: bytes) -> dict | None:
+        """Parse a notification from the lock.
+
+        Returns:
+            Parsed notification dict, or None if unknown type
+        """
+        header = data[0] & 0x0F
+        logger.debug("Parsing notification: len=%d, header=0x%02x", len(data), header)
+        if header == 0x01:  # DATA_ENCRYPTED
+            try:
+                data = await self.session.async_decrypt(data)
+                self._consecutive_decrypt_failures = 0
+            except PTLSDuplicateError:
+                # Re-delivered frame from the BLE notification dup-storm — the
+                # original was already processed. Not a desync, so don't count
+                # it toward the reconnect threshold.
+                logger.debug("Ignoring duplicate notification frame")
+                return None
+            except Exception as e:
+                self._consecutive_decrypt_failures += 1
+                if self._consecutive_decrypt_failures >= 3:
+                    logger.error(
+                        "3 consecutive decrypt failures — re-raising to trigger reconnect: %s", e
+                    )
+                    raise
+                logger.warning("Failed to decrypt notification (%d/3): %s",
+                               self._consecutive_decrypt_failures, e)
+                return None
+        elif header == 0x00:  # DATA_NOT_ENCRYPTED
+            data = data[1:]
+
+        if not data:
+            return None
+
+        notify_id = data[0]
+
+        if notify_id == NOTIFY_LOCK_STATUS_CHANGE:
+            lock_state = data[1] if len(data) > 1 else 0xFF
+            status = data[2] if len(data) > 2 else 0x00
+            trigger = data[3] if len(data) > 3 else 0xFF
+            state_name = LOCK_STATE_NAMES.get(lock_state, f"0x{lock_state:02x}")
+            trigger_name = TRIGGER_NAMES.get(trigger, f"unknown_0x{trigger:02x}")
+            door_state = data[8] if len(data) > 8 else DOOR_STATE_UNKNOWN
+            if door_state != DOOR_STATE_UNKNOWN:
+                self.door_state = door_state
+            door_name = DOOR_STATE_NAMES.get(door_state, f"0x{door_state:02x}")
+            # Bytes 4-7: access ID (big-endian uint32, identifies who triggered it)
+            access_id = int.from_bytes(data[4:8], "big") if len(data) > 7 else 0
+            logger.info(
+                "Lock status change: state=%s status=%s trigger=%s access_id=%d door=%s raw=%s",
+                state_name, "OK" if status == 0 else "JAMMED",
+                trigger_name, access_id, door_name, data.hex(),
+            )
+            return {
+                "type": "lock_state",
+                "state": lock_state,
+                "state_name": state_name,
+                "status": status,
+                "jammed": status == STATUS_JAMMED,
+                "trigger": trigger,
+                "trigger_name": trigger_name,
+                "access_id": access_id,
+                "door_state": door_state,
+                "door_name": door_name,
+            }
+
+        if notify_id == NOTIFY_NEED_DATE_TIME:
+            return {"type": "need_datetime"}
+
+        if notify_id == NOTIFY_SIGNED_DATETIME:
+            result = data[1] if len(data) > 1 else 0xFF
+            return {"type": "signed_datetime_ack", "result": result}
+
+        # Unprompted battery pushes; same payload as the GET_BATTERY response.
+        if notify_id == NOTIFY_BATTERY:
+            if len(data) < 2:
+                return None
+            return {
+                "type": "battery",
+                "level": data[1],
+                "charging": len(data) > 2 and data[2] == 1,
+            }
+
+        if notify_id in (
+            NOTIFY_BATTERY_START_CHARGING,
+            NOTIFY_BATTERY_STOP_CHARGING,
+        ):
+            if len(data) < 2:
+                return None
+            return {
+                "type": "battery",
+                "level": data[1],
+                "charging": notify_id == NOTIFY_BATTERY_START_CHARGING,
+            }
+
+        if notify_id == NOTIFY_BATTERY_FULLY_CHARGED:
+            # Carries no meaningful level byte; fully charged means 100%.
+            return {"type": "battery", "level": 100, "charging": False}
+
+        if notify_id == NOTIFY_ACCESSORY_BATTERY:
+            # Paired-accessory battery (door sensor). Push-only — no GET exists.
+            #   [0] level u8 (255=invalid) [1..4] ts i32 BE epoch seconds
+            #   [5..8] accessory_id i32 BE
+            if len(data) < 10:
+                logger.debug("Short accessory battery notification: %s", data.hex())
+                return None
+            level = data[1]
+            if not 0 <= level <= 100:
+                logger.debug("Ignoring invalid accessory battery level %d", level)
+                return None
+            # Stale readings are kept and the timestamp exposed instead, so a
+            # drifting lock clock can't silence the sensor entirely.
+            result = {
+                "type": "accessory_battery",
+                "level": level,
+                "timestamp": int.from_bytes(data[2:6], "big"),
+                "accessory_id": int.from_bytes(data[6:10], "big"),
+            }
+            logger.info(
+                "Accessory battery: id=%d level=%d%% ts=%d",
+                result["accessory_id"], level, result["timestamp"],
+            )
+            return result
+
+        if notify_id == NOTIFY_HAS_LOGS:
+            # Unread activity logs; repeats ~15s until read via 0x2D on char
+            # 0x0601. Deliberately not drained: the read clears the buffer, and
+            # those entries are what populates the vendor's cloud activity
+            # history. Named just to keep it out of "unknown".
+            return {"type": "has_logs"}
+
+        if notify_id == NOTIFY_DEVICE_STATS:
+            return {"type": "device_stats", "data": data[1:].hex()}
+
+        logger.debug("Unknown notification: 0x%02x data=%s", notify_id, data.hex())
+        return {"type": "unknown", "id": notify_id, "data": data.hex()}

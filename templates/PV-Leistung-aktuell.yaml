@@ -1,0 +1,9 @@
+- sensor:
+    - name: "PV Leistung aktuell"
+      unique_id: pv_leistung_aktuell
+      unit_of_measurement: "W"
+      device_class: power
+      state_class: measurement
+      icon: mdi:solar-power
+      state: >
+        {{ states('sensor.solarlog_ac_leistung') | float(0) }}

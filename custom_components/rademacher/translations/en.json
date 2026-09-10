@@ -1,0 +1,64 @@
+{
+  "title": "Rademacher HomePilot",
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configuration",
+        "description": "",
+        "data": {
+          "exclude": "EXCLUDE Devices (select devices that you DON'T want to add):",
+          "sensor_type": "Select Contact Sensors with Tilted Position:",
+          "enable_cyclic_scene_polling": "Enable Cyclic Scene Polling",
+          "create_scene_activation_entities": "Create Scene Activation Entities",
+          "include_non_executable_scenes": "Include Non Executable Scenes",
+          "update_interval": "Update Interval (5–120 s)",
+          "scene_update_interval": "Scene Update Interval (10–120 s)",
+          "create_inverted_cover_position": "Create inverted cover position sensors"
+        }
+      }
+    }
+  },
+  "config": {
+    "step": {
+      "user": {
+        "title": "Enter Bridge's Hostname/IP Address",
+        "description": "Please enter the Hostname or IP Address and Password of your Rademacher Bridge (Start2Smart or Homepilot).",
+        "data": {
+          "host": "Hostname/IP Address"
+        }
+      },
+      "user_password": {
+        "title": "Enter Bridge's Password",
+        "description": "Please enter the Password of your Rademacher Bridge (Start2Smart or Homepilot).",
+        "data": {
+          "password": "Password"
+        }
+      },
+      "config": {
+        "title": "Configuration",
+        "description": "",
+        "data": {
+          "exclude": "EXCLUDE Devices (select devices that you DON'T want to add):",
+          "sensor_type": "Select Contact Sensors with Tilted Position:",
+          "enable_cyclic_scene_polling": "Enable Cyclic Scene Polling",
+          "create_scene_activation_entities": "Create Scene Activation Entities",
+          "include_non_executable_scenes": "Include Non Executable Scenes",
+          "update_interval": "Update Interval (5–120 s)",
+          "scene_update_interval": "Scene Update Interval (10–120 s)",
+          "create_inverted_cover_position": "Create inverted cover position sensors"
+        }
+      }
+    },
+    "error": {
+      "no_device_selected": "You need to select at least one device.",
+      "cannot_connect": "Error connecting to the bridge. Please verify the bridge is connected to the network, and verify that the Hostname/IP is correct.",
+      "auth_error": "Invalid password. Please verify the password provided is correct.",
+      "unknown": "Unknown Exception."
+    },
+    "abort": {
+      "no_devices_found": "No devices were found.",
+      "cannot_connect": "Error connecting to the bridge. Please verify the bridge is connected to the network, and verify that the Hostname/IP is correct.",
+      "reauth_successful": "Reauthentication was successful."
+    }
+  }
+}
